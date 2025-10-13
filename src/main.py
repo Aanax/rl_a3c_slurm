@@ -15,6 +15,7 @@ from shared_optim import SharedRMSprop, SharedAdam
 #import gym.configuration import undo_logger_setup
 import time
 import sys
+import random
 
 # Config file reading setup
 config = configparser.ConfigParser()
@@ -67,6 +68,8 @@ except:
 # training was far superior
 
 if __name__ == '__main__':
+    if args.seed == 0:
+        args.seed = random.randint(0, 1000000)
     torch.manual_seed(args.seed)
     if args.gpu_ids != [-1]:
         torch.cuda.manual_seed(args.seed)

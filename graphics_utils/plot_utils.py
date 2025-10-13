@@ -76,7 +76,7 @@ def get_mean_stats_df(logs_folder):
     for logname in os.listdir(logs_folder):
         if not logname.startswith("."):
             log_len = get_log_len(logs_folder+logname)
-            print(log_len)
+            print("log ",logname," len ",log_len)
             if log_len<min_len:
                 min_len = log_len
 
@@ -86,7 +86,7 @@ def get_mean_stats_df(logs_folder):
     for logname in os.listdir(logs_folder):
         if not logname.startswith("."):
             log_df = get_log_df(logs_folder+logname)[:min_len].drop(["server_time"],axis=1)
-            print(len(log_df))
+            print("log ",logname," df len ",len(log_df))
             dfs.append(log_df)
             log_dfs.append(log_df.values)
     columns = log_df.columns
@@ -185,9 +185,10 @@ def get_mean_interpolated_stats_df(logs_folder, target_value = "reward_mean_10",
         print("verbose ", verbose)
     
     listdir = [i for i in os.listdir(logs_folder) if (not os.path.isdir(logs_folder+i))]
+    print("num of logs in folder ", len(listdir), flush=True)
     
     for logname in listdir:
-        if logname.endswith(".log"):
+        if True:#logname.endswith("log"):
             log_len = get_log_len(logs_folder+logname)
             if verbose==2:
                 print("log_len ",log_len)
@@ -203,7 +204,7 @@ def get_mean_interpolated_stats_df(logs_folder, target_value = "reward_mean_10",
     max_num_frames = np.inf
     min_num_frames = np.inf
     for logname in listdir:
-        if logname.endswith(".log") or logname.endswith("log"):
+        if True:
             log_df = get_log_df(logs_folder+logname).drop(["server_time"],axis=1) #[:min_len]
             if verbose==2:
                 print("Got log df len ",len(log_df))
@@ -296,13 +297,13 @@ def draw_meanIntep_and_runs(mean, runs, new_x, n_tests = 500, col = "red", alpha
     if ax is None:
         plt.figure(figsize=(200,100))
         ax=plt.gca()
-        ax.plot(new_x, mean, lw=30, color=col, label=label, linestyle=linestyle)#, ax=ax)
+        ax.plot(new_x, mean, lw=3, color=col, label=label, linestyle=linestyle)#, ax=ax)
         #mean[:n_frames].plot(x="frames_total", y="reward_mean_10", figsize=(20,10), lw=4,legend=False,color=col, fontsize=20, label=label)
     else:
-        ax.plot(new_x,mean, lw=30, color=col,label=label, linestyle=linestyle)#,ax=ax)
+        ax.plot(new_x,mean, lw=3, color=col,label=label, linestyle=linestyle)#,ax=ax)
         #mean[:n_frames].p, lot(x="frames_total", y="reward_mean_10", ax=ax, figsize=(20,10), lw=4,legend=False,color=col, fontsize=20, label=label)
     for run in runs:
-        ax.plot(new_x, run, lw=30,
+        ax.plot(new_x, run, lw=3,
                 alpha=alpha,color=col, label='_nolegend_')
         #run[:n_frames].plot(x="frames_total", y="reward_mean_10", ax=ax, lw=4, legend=False, alpha=alpha,color=col, fontsize=20, label='_nolegend_')
 

@@ -3,3 +3,4 @@
 .ipynb_checkpoints
 __pycache__
 plot_trainings.ipynb
+latest_runs*

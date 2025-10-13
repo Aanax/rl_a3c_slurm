@@ -20,5 +20,5 @@ conda activate pytorch_rl
 echo "ACTIVATED"
 
 param=$1
-python /s/ls4/users/aamore/rl_a3c_pytorch/src/main.py /s/ls4/users/aamore/rl_a3c_pytorch/configs/run_config_base.ini ${param} | tee mytask_logs/mytask.log."$SLURM_JOBID"
+python /s/ls4/users/aamore/rl_a3c_pytorch/src/main.py /s/ls4/users/aamore/rl_a3c_pytorch/configs/run_config_our.ini ${param} | tee mytask_logs/mytask.log."$SLURM_JOBID"
 

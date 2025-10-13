@@ -17,9 +17,9 @@ import copy
 def test(args, shared_model, env_conf, frames_total):
     ptitle("Test Agent")
     gpu_id = args.gpu_ids[-1]
-    log_dir_path = f"{args.log_dir}{args.experiment_name}_{args.parallel_id}/"
+    log_dir_path = f"{args.log_dir}{args.experiment_name}/"
     os.makedirs(log_dir_path, exist_ok=True)
-    log_file_path = rf"{log_dir_path}{args.env}_log"
+    log_file_path = rf"{log_dir_path}{args.env}_log_{args.parallel_id}"
     setup_logger(f"{args.experiment_name}_{args.parallel_id}_{args.env}_log", log_file_path)
     log = logging.getLogger(f"{args.experiment_name}_{args.parallel_id}_{args.env}_log")
     d_args = vars(args)
@@ -41,7 +41,8 @@ def test(args, shared_model, env_conf, frames_total):
     if args.tensorboard_logger:
         from torch.utils.tensorboard import SummaryWriter
         dummy_input = (torch.zeros(1, player.env.observation_space.shape[0], 80, 80), torch.zeros(1, args.hidden_size), torch.zeros(1, args.hidden_size),  )
-        writer = SummaryWriter(f"runs/{args.experiment_name}_{args.parallel_id}_{args.env}_training")
+        writer_path = f"runs/{args.experiment_name}/{args.experiment_name}_{args.env}_training_{args.parallel_id}"
+        writer = SummaryWriter(writer_path)
         writer.add_graph(player.model, dummy_input, False)
         writer.close()
 
@@ -95,9 +96,9 @@ def test(args, shared_model, env_conf, frames_total):
                     for name, weight in player.model.named_parameters():
                         writer.add_histogram(name, weight, num_tests)
                 if (step_counter - prev_video_at) > args.gif_image_save_frequency:
-                    images_dir = f"./gifs/{args.experiment_name}_{args.parallel_id}/"
+                    images_dir = f"./gifs/{args.experiment_name}/"
                     os.makedirs(images_dir, exist_ok=True)
-                    address = f"{images_dir}{args.env}_run{step_counter}_rew{reward_sum}.gif"
+                    address = f"{images_dir}{args.env}_run{step_counter}_rew{reward_sum}_parallel_{args.parallel_id}.gif"
                     saveanimation(rgb_frames, address=address)
                     prev_video_at = step_counter
                 rgb_frames = []

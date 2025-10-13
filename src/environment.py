@@ -56,8 +56,8 @@ class AtariRescale(gym.ObservationWrapper):
     def observation(self, observation):
         return process_frame(observation, self.conf)
 
-
-class NormalizedEnv(gym.ObservationWrapper):
+    
+class NormalizedEnv_orig(gym.ObservationWrapper):
     def __init__(self, env=None):
         gym.ObservationWrapper.__init__(self, env)
         self.state_mean = 0
@@ -77,6 +77,77 @@ class NormalizedEnv(gym.ObservationWrapper):
         unbiased_std = self.state_std / (1 - (self.alpha**self.num_steps))
 
         return (observation - unbiased_mean) / (unbiased_std + 1e-8)
+
+class NormalizedEnvDiffOnly(gym.ObservationWrapper):
+    """original"""
+    def __init__(self, env=None):
+        gym.ObservationWrapper.__init__(self, env)
+        self.state_mean = 0
+        self.state_mean_diff = 0
+        self.state_std_diff = 0
+        self.alpha = 0.9999
+        self.num_steps = 0
+        self.previous_observation = np.zeros([1, 80, 80]).astype(np.float32)
+#         self.was_real_done = True
+
+    def observation(self, observation):
+        
+        observation = observation - self.previous_observation
+
+        self.previous_observation = observation
+        
+        self.num_steps += 1
+        self.state_mean = self.state_mean * self.alpha + \
+            observation.mean() * (1 - self.alpha)
+        self.state_std = self.state_std * self.alpha + \
+            observation.std() * (1 - self.alpha)
+
+        unbiased_mean = self.state_mean / (1 - (self.alpha**self.num_steps))
+        unbiased_std = self.state_std / (1 - (self.alpha**self.num_steps))
+
+        return ((observation - unbiased_mean) / (unbiased_std + 1e-8))
+
+
+class NormalizedEnv(gym.ObservationWrapper):
+    """experimental one """
+    def __init__(self, env=None):
+        gym.ObservationWrapper.__init__(self, env)
+        self.state_mean = 0
+        self.state_std = 0
+        self.state_mean_diff = 0
+        self.state_std_diff = 0
+        self.alpha = 0.9999
+        self.num_steps = 0
+        self.previous_observation = np.zeros([1, 80, 80]).astype(np.float32)
+        self.observation_space = Box(0.0, 1.0, [2, 80, 80], dtype=np.uint8)
+
+#         self.was_real_done = True
+
+    def observation(self, observation):
+        
+        observation_diff = observation - self.previous_observation
+
+        self.previous_observation = observation
+        
+        self.num_steps += 1
+        self.state_mean = self.state_mean * self.alpha + \
+            observation.mean() * (1 - self.alpha)
+        self.state_std = self.state_std * self.alpha + \
+            observation.std() * (1 - self.alpha)
+
+        unbiased_mean = self.state_mean / (1 - (self.alpha**self.num_steps))
+        unbiased_std = self.state_std / (1 - (self.alpha**self.num_steps))
+
+#         self.num_steps += 1
+#         self.state_mean_diff = self.state_mean_diff * self.alpha + \
+#             observation_diff.mean() * (1 - self.alpha)
+#         self.state_std_diff = self.state_std_diff * self.alpha + \
+#             observation_diff.std() * (1 - self.alpha)
+
+#         unbiased_mean_diff = self.state_mean_diff / (1 - (self.alpha**self.num_steps))
+#         unbiased_std_diff = self.state_std_diff / (1 - (self.alpha**self.num_steps))
+
+        return np.concatenate((((observation - unbiased_mean) / (unbiased_std + 1e-8)), observation_diff))
 
 
 class NoopResetEnv(gym.Wrapper):
