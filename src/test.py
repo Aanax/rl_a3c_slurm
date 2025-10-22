@@ -73,6 +73,9 @@ def test(args, shared_model, env_conf, frames_total):
 
             player.action_test()
             step_counter += 1
+            frames_total.value += 1
+            if frames_total.value > args.total_steps_stop:
+                break
             rgb_frames.append(player.env.render(mode='rgb_array'))
             reward_sum += player.reward
 

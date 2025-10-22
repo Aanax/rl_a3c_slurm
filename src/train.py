@@ -117,6 +117,8 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             player.clear_actions()
             steps_taken = step + 1 if player.done else num_steps
             frames_total.value += steps_taken
+            if frames_total.value > args.total_steps_stop:
+                break
     except KeyboardInterrupt:
         time.sleep(0.01)
         print("KeyboardInterrupt exception is caught")
