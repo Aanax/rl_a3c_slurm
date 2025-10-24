@@ -29,7 +29,8 @@ def atari_env(env_id, env_conf, args):
         
     env._max_episode_steps = args.max_episode_length
     env = AtariRescale(env, env_conf)
-    env = NormalizedEnv(env)
+    norm_class = globals()[args.input_normalization_class]
+    env = norm_class(env, args)
     env = EpisodicLifeEnv(env)
     print("ENV was realdone 2 ", env.was_real_done, flush=True)
     return env
@@ -58,195 +59,130 @@ class AtariRescale(gym.ObservationWrapper):
 
     
 class NormalizedEnv_orig(gym.ObservationWrapper):
-    def __init__(self, env=None):
-        gym.ObservationWrapper.__init__(self, env)
+    """
+    Original normalization using unbiased running mean and std across all steps.
+    """
+    def __init__(self, env=None, args=None):
+        super().__init__(env)
         self.state_mean = 0
         self.state_std = 0
-        self.alpha = 0.9999
+        self.alpha = getattr(args, 'normalization_alpha', 0.9999)
         self.num_steps = 0
-#         self.was_real_done = True
 
     def observation(self, observation):
         self.num_steps += 1
-        self.state_mean = self.state_mean * self.alpha + \
-            observation.mean() * (1 - self.alpha)
-        self.state_std = self.state_std * self.alpha + \
-            observation.std() * (1 - self.alpha)
+        self.state_mean = self.state_mean * self.alpha + observation.mean() * (1 - self.alpha)
+        self.state_std = self.state_std * self.alpha + observation.std() * (1 - self.alpha)
 
-        unbiased_mean = self.state_mean / (1 - (self.alpha**self.num_steps))
-        unbiased_std = self.state_std / (1 - (self.alpha**self.num_steps))
+        unbiased_mean = self.state_mean / (1 - (self.alpha ** self.num_steps))
+        unbiased_std = self.state_std / (1 - (self.alpha ** self.num_steps))
 
         return (observation - unbiased_mean) / (unbiased_std + 1e-8)
 
 class NormalizedEnvDiffOnly(gym.ObservationWrapper):
-    """original"""
-    def __init__(self, env=None):
-        gym.ObservationWrapper.__init__(self, env)
+    """
+    Normalization that only returns the difference from the previous observation,
+    normalized using unbiased running mean and std.
+    """
+    def __init__(self, env=None, args=None):
+        super().__init__(env)
         self.state_mean = 0
-        self.state_mean_diff = 0
-        self.state_std_diff = 0
-        self.alpha = 0.9999
+        self.alpha = getattr(args, 'normalization_alpha', 0.9999)
         self.num_steps = 0
         self.previous_observation = np.zeros([1, 80, 80]).astype(np.float32)
-#         self.was_real_done = True
 
     def observation(self, observation):
-        
         observation = observation - self.previous_observation
+        self.previous_observation = np.copy(observation)
 
-        self.previous_observation = observation
-        
         self.num_steps += 1
-        self.state_mean = self.state_mean * self.alpha + \
-            observation.mean() * (1 - self.alpha)
-        self.state_std = self.state_std * self.alpha + \
-            observation.std() * (1 - self.alpha)
+        self.state_mean = self.state_mean * self.alpha + observation.mean() * (1 - self.alpha)
+        self.state_std = self.state_std * self.alpha + observation.std() * (1 - self.alpha)
 
-        unbiased_mean = self.state_mean / (1 - (self.alpha**self.num_steps))
-        unbiased_std = self.state_std / (1 - (self.alpha**self.num_steps))
+        unbiased_mean = self.state_mean / (1 - (self.alpha ** self.num_steps))
+        unbiased_std = self.state_std / (1 - (self.alpha ** self.num_steps))
 
-        return ((observation - unbiased_mean) / (unbiased_std + 1e-8))
+        return (observation - unbiased_mean) / (unbiased_std + 1e-8)
 
 class NormalizedEnvDiffnoDiff(gym.ObservationWrapper):
-    """experimental one """
-    def __init__(self, env=None):
-        gym.ObservationWrapper.__init__(self, env)
+    """
+    Concatenates the running mean-std normalized current observation with the not normalized difference
+    from the previous normalized observation.
+    """
+    def __init__(self, env=None, args=None):
+        super().__init__(env)
         self.state_mean = 0
         self.state_std = 0
-        self.state_mean_diff = 0
-        self.state_std_diff = 0
-        self.alpha = 0.9999
+        self.alpha = getattr(args, 'normalization_alpha', 0.9999)
         self.num_steps = 0
         self.previous_observation = np.zeros([1, 80, 80]).astype(np.float32)
         self.observation_space = Box(0.0, 1.0, [2, 80, 80], dtype=np.uint8)
 
-#         self.was_real_done = True
+    def observation(self, observation):
+        self.num_steps += 1
+        self.state_mean = self.state_mean * self.alpha + observation.mean() * (1 - self.alpha)
+        self.state_std = self.state_std * self.alpha + observation.std() * (1 - self.alpha)
+
+        unbiased_mean = self.state_mean / (1 - (self.alpha ** self.num_steps))
+        unbiased_std = self.state_std / (1 - (self.alpha ** self.num_steps))
+
+        normalized_obs = (observation - unbiased_mean) / (unbiased_std + 1e-8)
+        observation_diff = normalized_obs - self.previous_observation
+
+        self.previous_observation = np.copy(normalized_obs)
+
+        return np.concatenate([normalized_obs, observation_diff])
+
+class NormalizedEnvDiffConcat1frameNorm(gym.ObservationWrapper):
+    """
+    Concatenates per-frame mean-std normalized observation with
+    per-frame normalized difference from previous non-normalized observations.
+    """
+    def __init__(self, env=None, args=None):
+        super().__init__(env)
+        self.previous_observation = np.zeros([1, 80, 80]).astype(np.float32)
+        self.observation_space = Box(0.0, 1.0, [2, 80, 80], dtype=np.uint8)
 
     def observation(self, observation):
+        observation_diff = observation - self.previous_observation
+        self.previous_observation = np.copy(observation)
 
-        
-        
-        self.num_steps += 1
-        self.state_mean = self.state_mean * self.alpha + \
-            observation.mean() * (1 - self.alpha)
-        self.state_std = self.state_std * self.alpha + \
-            observation.std() * (1 - self.alpha)
+        # Per-frame normalization
+        observation = (observation - observation.mean()) / (observation.std() + 1e-8)
+        observation_diff = (observation_diff - observation_diff.mean()) / (observation_diff.std() + 1e-8)
 
-        unbiased_mean = self.state_mean / (1 - (self.alpha**self.num_steps))
-        unbiased_std = self.state_std / (1 - (self.alpha**self.num_steps))
-        
-        
-        observation_diff = ((observation - unbiased_mean) / (unbiased_std + 1e-8)) - self.previous_observation
-        
-        self.previous_observation = ((observation - unbiased_mean) / (unbiased_std + 1e-8))
+        return np.concatenate([observation, observation_diff])
 
-#         self.num_steps += 1
-#         self.state_mean_diff = self.state_mean_diff * self.alpha + \
-#             observation_diff.mean() * (1 - self.alpha)
-#         self.state_std_diff = self.state_std_diff * self.alpha + \
-#             observation_diff.std() * (1 - self.alpha)
 
-#         unbiased_mean_diff = self.state_mean_diff / (1 - (self.alpha**self.num_steps))
-#         unbiased_std_diff = self.state_std_diff / (1 - (self.alpha**self.num_steps))
-
-        return np.concatenate((((observation - unbiased_mean) / (unbiased_std + 1e-8)), observation_diff))
 
 class NormalizedEnv(gym.ObservationWrapper):
-    """experimental one  DiffConcat1frameNorm"""
-    def __init__(self, env=None):
-        gym.ObservationWrapper.__init__(self, env)
-        self.state_mean = 0
-        self.state_std = 0
-        self.state_mean_diff = 0
-        self.state_std_diff = 0
-        self.alpha = 0.9999
-        self.num_steps = 0
-        self.previous_observation = np.zeros([1, 80, 80]).astype(np.float32)
-        self.observation_space = Box(0.0, 1.0, [2, 80, 80], dtype=np.uint8)
-
-#         self.was_real_done = True
+    """
+    Performs per-frame mean-std normalization for each observation.
+    """
+    def __init__(self, env=None, args=None):
+        super().__init__(env)
+        self.observation_space = Box(0.0, 1.0, [1, 80, 80], dtype=np.uint8)
 
     def observation(self, observation):
-
-        
-        
-#         self.num_steps += 1
-#         self.state_mean = self.state_mean * self.alpha + \
-#             observation.mean() * (1 - self.alpha)
-#         self.state_std = self.state_std * self.alpha + \
-#             observation.std() * (1 - self.alpha)
-
-#         unbiased_mean = self.state_mean / (1 - (self.alpha**self.num_steps))
-#         unbiased_std = self.state_std / (1 - (self.alpha**self.num_steps))
-        
-        
-        observation_diff = observation - self.previous_observation
-        
-        self.previous_observation = observation
-
-        observation =(observation - observation.mean()) / (observation.std()+ 1e-8)
-        observation_diff =(observation_diff - observation_diff.mean()) / (observation_diff.std()+ 1e-8)
-#         self.num_steps += 1
-#         self.state_mean_diff = self.state_mean_diff * self.alpha + \
-#             observation_diff.mean() * (1 - self.alpha)
-#         self.state_std_diff = self.state_std_diff * self.alpha + \
-#             observation_diff.std() * (1 - self.alpha)
-
-#         unbiased_mean_diff = self.state_mean_diff / (1 - (self.alpha**self.num_steps))
-#         unbiased_std_diff = self.state_std_diff / (1 - (self.alpha**self.num_steps))
-
-        return np.concatenate((observation, observation_diff))
-
+        return (observation - observation.mean()) / (observation.std() + 1e-8)
 
 class NormalizedEnvDiffConcat1frameNormDiffFromNormed(gym.ObservationWrapper):
-    """experimental one """
-    def __init__(self, env=None):
-        gym.ObservationWrapper.__init__(self, env)
-        self.state_mean = 0
-        self.state_std = 0
-        self.state_mean_diff = 0
-        self.state_std_diff = 0
-        self.alpha = 0.9999
-        self.num_steps = 0
+    """
+    Concatenates per-frame normalized observation with per-frame normalized difference
+    from the previous normalized observation (difference computed after normalization).
+    """
+    def __init__(self, env=None, args=None):
+        super().__init__(env)
         self.previous_observation = np.zeros([1, 80, 80]).astype(np.float32)
         self.observation_space = Box(0.0, 1.0, [2, 80, 80], dtype=np.uint8)
 
-#         self.was_real_done = True
-
     def observation(self, observation):
-
-        
-        
-#         self.num_steps += 1
-#         self.state_mean = self.state_mean * self.alpha + \
-#             observation.mean() * (1 - self.alpha)
-#         self.state_std = self.state_std * self.alpha + \
-#             observation.std() * (1 - self.alpha)
-
-#         unbiased_mean = self.state_mean / (1 - (self.alpha**self.num_steps))
-#         unbiased_std = self.state_std / (1 - (self.alpha**self.num_steps))
-        
-        
-        
-
-        observation =(observation - observation.mean()) / (observation.std()+ 1e-8)
-        
+        observation = (observation - observation.mean()) / (observation.std() + 1e-8)
         observation_diff = observation - self.previous_observation
-        
-        self.previous_observation = observation
-        
-        observation_diff =(observation_diff - observation_diff.mean()) / (observation_diff.std()+ 1e-8)
+        self.previous_observation = np.copy(observation)
+        observation_diff = (observation_diff - observation_diff.mean()) / (observation_diff.std() + 1e-8)
 
-#         self.num_steps += 1
-#         self.state_mean_diff = self.state_mean_diff * self.alpha + \
-#             observation_diff.mean() * (1 - self.alpha)
-#         self.state_std_diff = self.state_std_diff * self.alpha + \
-#             observation_diff.std() * (1 - self.alpha)
-
-#         unbiased_mean_diff = self.state_mean_diff / (1 - (self.alpha**self.num_steps))
-#         unbiased_std_diff = self.state_std_diff / (1 - (self.alpha**self.num_steps))
-
-        return np.concatenate((observation, observation_diff))
+        return np.concatenate([observation, observation_diff])
 
 
 class NoopResetEnv(gym.Wrapper):
@@ -367,4 +303,3 @@ class MaxAndSkipEnv(gym.Wrapper):
         obs = self.env.reset(**kwargs)
         self._obs_buffer.append(obs)
         return obs
-

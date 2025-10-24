@@ -48,6 +48,8 @@ args.gif_image_save_frequency = config.getint('DEFAULT', 'gif_image_save_frequen
 args.env_config = config.get('DEFAULT', 'env_config', fallback='configs/envs_config.json')
 args.experiment_name = config.get('DEFAULT', 'experiment_name', fallback='unnamed_experiment')
 args.total_steps_stop = config.getint('DEFAULT', 'total_steps_stop', fallback=10000000)
+args.input_normalization_class = config.get('DEFAULT', 'input_normalization_class', fallback='NormalizedEnv')
+args.normalization_alpha = config.getfloat('DEFAULT', 'normalization_alpha', fallback=0.9999)
 
 # For list types
 gpu_ids_str = config.get('DEFAULT', 'gpu_ids', fallback='-1')
