@@ -6,7 +6,7 @@ import torch
 import torch.optim as optim
 from environment import atari_env
 from utils import ensure_shared_grads
-from model import A3Clstm
+import model
 from player_util import Agent
 from torch.autograd import Variable
 import time
@@ -28,7 +28,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
     env.seed(args.seed + rank)
     player = Agent(None, env, args, None)
     player.gpu_id = gpu_id
-    player.model = A3Clstm(player.env.observation_space.shape[0], player.env.action_space, args)
+    player.model = getattr(model, args.model_type)(player.env.observation_space.shape[0], player.env.action_space, args)
 
     player.state = player.env.reset()
     if gpu_id >= 0:

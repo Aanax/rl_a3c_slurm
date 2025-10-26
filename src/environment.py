@@ -104,7 +104,7 @@ class NormalizedEnvDiffOnly(gym.ObservationWrapper):
 
         return (observation - unbiased_mean) / (unbiased_std + 1e-8)
 
-class NormalizedEnvDiffnoDiff(gym.ObservationWrapper):
+class NormalizedEnvGameNormNoNormDiffOnNorm(gym.ObservationWrapper):
     """
     Concatenates the running mean-std normalized current observation with the not normalized difference
     from the previous normalized observation.

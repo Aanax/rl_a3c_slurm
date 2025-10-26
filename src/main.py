@@ -8,7 +8,7 @@ import torch.multiprocessing as mp
 from torch.multiprocessing import Value
 from environment import atari_env
 from utils import read_config
-from model import A3Clstm
+import model
 from train import train
 from test import test
 from shared_optim import SharedRMSprop, SharedAdam
@@ -50,6 +50,7 @@ args.experiment_name = config.get('DEFAULT', 'experiment_name', fallback='unname
 args.total_steps_stop = config.getint('DEFAULT', 'total_steps_stop', fallback=10000000)
 args.input_normalization_class = config.get('DEFAULT', 'input_normalization_class', fallback='NormalizedEnv')
 args.normalization_alpha = config.getfloat('DEFAULT', 'normalization_alpha', fallback=0.9999)
+args.model_type = config.get('DEFAULT', 'model_type', fallback='A3Clstm')
 
 # For list types
 gpu_ids_str = config.get('DEFAULT', 'gpu_ids', fallback='-1')
@@ -83,7 +84,7 @@ if __name__ == '__main__':
         if i in args.env:
             env_conf = setup_json[i]
     env = atari_env(args.env, env_conf, args)
-    shared_model = A3Clstm(env.observation_space.shape[0], env.action_space, args)
+    shared_model = getattr(model, args.model_type)(env.observation_space.shape[0], env.action_space, args)
     if args.load:
         saved_state = torch.load(
             f"{args.load_model_dir}{args.env}.dat",

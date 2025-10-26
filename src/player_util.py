@@ -1,6 +1,7 @@
 from __future__ import division
 import os
 os.environ["OMP_NUM_THREADS"] = "1"
+from collections import deque
 import torch
 import torch.nn.functional as F
 from torch.autograd import Variable
@@ -24,10 +25,18 @@ class Agent(object):
         self.reward = 0
         self.gpu_id = -1
         self.hidden_size = args.hidden_size
+        if state is not None:
+            self.prev_state = state.clone()
+            self.mem = torch.zeros_like(state)
+        else:
+            self.prev_state = None
+            self.mem = None
+        self.prev_np_states = deque(maxlen=10)
 
     def action_train(self):
+
         value, logit, self.hx, self.cx = self.model(
-            self.state.unsqueeze(0), self.hx, self.cx
+            self.state.unsqueeze(0), self.hx, self.cx, self.mem
         )
         prob = F.softmax(logit, dim=1)
         log_prob = F.log_softmax(logit, dim=1)
@@ -42,6 +51,17 @@ class Agent(object):
                 self.state = torch.from_numpy(state).float().cuda()
         else:
             self.state = torch.from_numpy(state).float()
+
+        # Update running memory
+        diff = self.state - self.prev_state
+        self.mem = (diff + self.args.gamma * self.mem).detach()
+
+        self.prev_state = self.state.clone()
+
+        if self.done:
+            # Actually, since mem is detached and recursively built, reset to zeros
+            self.mem = torch.zeros_like(self.state)
+
         self.eps_len += 1
         self.reward = max(min(self.reward, 1), -1)
         self.values.append(value)
@@ -61,7 +81,7 @@ class Agent(object):
                     self.hx = torch.zeros(1, self.hidden_size)
 
             value, logit, self.hx, self.cx = self.model(
-                self.state.unsqueeze(0), self.hx, self.cx
+                self.state.unsqueeze(0), self.hx, self.cx, self.mem
             )
             prob = F.softmax(logit, dim=1)
             action = prob.cpu().numpy().argmax()
@@ -71,6 +91,16 @@ class Agent(object):
                 self.state = torch.from_numpy(state).float().cuda()
         else:
             self.state = torch.from_numpy(state).float()
+
+        # Update running memory
+        diff = self.state - self.prev_state
+        self.mem = (diff + self.args.gamma * self.mem).detach()
+
+        self.prev_state = self.state.clone()
+
+        if self.done:
+            # Actually, since mem is detached and recursively built, reset to zeros
+            self.mem = torch.zeros_like(self.state)
 
         self.eps_len += 1
         return self

@@ -5,7 +5,7 @@ from setproctitle import setproctitle as ptitle
 import torch
 from environment import atari_env
 from utils import setup_logger
-from model import A3Clstm
+import model
 from player_util import Agent
 from torch.autograd import Variable
 import time
@@ -36,7 +36,7 @@ def test(args, shared_model, env_conf, frames_total):
     reward_total_sum = 0
     player = Agent(None, env, args, None)
     player.gpu_id = gpu_id
-    player.model = A3Clstm(player.env.observation_space.shape[0], player.env.action_space, args)
+    player.model = getattr(model, args.model_type)(player.env.observation_space.shape[0], player.env.action_space, args)
 
     if args.tensorboard_logger:
         from torch.utils.tensorboard import SummaryWriter
