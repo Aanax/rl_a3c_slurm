@@ -185,6 +185,33 @@ class NormalizedEnvDiffConcat1frameNormDiffFromNormed(gym.ObservationWrapper):
         return np.concatenate([observation, observation_diff])
 
 
+class NormalizedEnvPassThrough(gym.ObservationWrapper):
+    """
+    Passes the input frame without any modification.
+    """
+    def __init__(self, env=None, args=None):
+        super().__init__(env)
+        self.observation_space = Box(0.0, 1.0, [1, 80, 80], dtype=np.uint8)
+
+    def observation(self, observation):
+        return observation
+
+
+class NormalizedEnvAddDiffPassThrough(gym.ObservationWrapper):
+    """
+    Concatenates the current observation with the difference from the previous observation.
+    """
+    def __init__(self, env=None, args=None):
+        super().__init__(env)
+        self.previous_observation = np.zeros([1, 80, 80]).astype(np.float32)
+        self.observation_space = Box(0.0, 1.0, [2, 80, 80], dtype=np.uint8)
+
+    def observation(self, observation):
+        observation_diff = observation - self.previous_observation
+        self.previous_observation = np.copy(observation)
+        return np.concatenate([observation, observation_diff])
+
+
 class NoopResetEnv(gym.Wrapper):
     def __init__(self, env, noop_max=30):
         """Sample initial states by taking random number of no-ops on reset.
