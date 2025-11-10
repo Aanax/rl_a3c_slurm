@@ -188,15 +188,16 @@ def get_mean_interpolated_stats_df(logs_folder, target_value = "reward_mean_10",
     print("num of logs in folder ", len(listdir), flush=True)
     
     for logname in listdir:
-        if True:#logname.endswith("log"):
+        if "log" in logname:
             log_len = get_log_len(logs_folder+logname)
             if verbose==2:
                 print("log_len ",log_len)
             if log_len<min_len:
                 min_len = log_len
+            last_log_logname = logname
     if verbose==2:
         print("Minimal log len",min_len)
-    offset = get_log_offset(logs_folder+logname)
+    offset = get_log_offset(logs_folder+last_log_logname)
     min_len -= offset
     if verbose==2:
         print("So final min_len is", min_len)
@@ -204,28 +205,29 @@ def get_mean_interpolated_stats_df(logs_folder, target_value = "reward_mean_10",
     max_num_frames = np.inf
     min_num_frames = np.inf
     for logname in listdir:
-        if True:
-            log_df = get_log_df(logs_folder+logname).drop(["server_time"],axis=1) #[:min_len]
-            if verbose==2:
-                print("Got log df len ",len(log_df))
-            
-            list_frames = list(log_df["frames_total"])
-            last_num_frames = list_frames[-1]
-            
-            if last_num_frames >=min_frames_in_log_to_use_it:
-                dfs.append(log_df)
-            else:
-                continue
-            if verbose==2:
-                print("Got last framenum ", last_num_frames)
-            first_num_frames = list_frames[0]
-            if verbose==2:
-                print("Got first framenum ", first_num_frames)
-            if last_num_frames<max_num_frames:
-                max_num_frames = last_num_frames
-            if first_num_frames<min_num_frames:
-                min_num_frames = first_num_frames
-            interp_funcs.append(interp1d(list_frames, list(log_df[target_value].fillna(default_r)),fill_value="extrapolate"))
+        if "log" in logname:
+            if True:
+                log_df = get_log_df(logs_folder+logname).drop(["server_time"],axis=1) #[:min_len]
+                if verbose==2:
+                    print("Got log df len ",len(log_df))
+
+                list_frames = list(log_df["frames_total"])
+                last_num_frames = list_frames[-1]
+
+                if last_num_frames >=min_frames_in_log_to_use_it:
+                    dfs.append(log_df)
+                else:
+                    continue
+                if verbose==2:
+                    print("Got last framenum ", last_num_frames)
+                first_num_frames = list_frames[0]
+                if verbose==2:
+                    print("Got first framenum ", first_num_frames)
+                if last_num_frames<max_num_frames:
+                    max_num_frames = last_num_frames
+                if first_num_frames<min_num_frames:
+                    min_num_frames = first_num_frames
+                interp_funcs.append(interp1d(list_frames, list(log_df[target_value].fillna(default_r)),fill_value="extrapolate"))
     #print(interp_funcs[0]._check_bounds(0))
     
 #     #get original stds ### THEY DONT MATCH BY X! ASYNC. DIFFERENT TIMES

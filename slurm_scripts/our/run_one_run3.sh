@@ -6,6 +6,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:4
 #SBATCH -p hpc5-el7-gpu-3d
+#SBATCH --exclusive
 
 export CUDA_HOME=/s/ls4/sw/cuda/10.2/
 export LD_LIBRARY_PATH="/s/ls4/sw/cuda/10.2/lib64:$LD_LIBRARY_PATH"
@@ -20,5 +21,4 @@ conda activate pytorch_rl
 echo "ACTIVATED"
 
 param=$1
-python /s/ls4/users/aamore/rl_a3c_pytorch/src/main.py /s/ls4/users/aamore/rl_a3c_pytorch/configs/run_config_our2.ini ${param} | tee mytask_logs/mytask.log."$SLURM_JOBID"
-
+python /s/ls4/users/aamore/rl_a3c_pytorch/src/main.py /s/ls4/users/aamore/rl_a3c_pytorch/configs/run_config_our3.ini ${param} | tee mytask_logs/mytask.log."$SLURM_JOBID"

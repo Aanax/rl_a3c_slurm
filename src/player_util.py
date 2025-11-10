@@ -19,6 +19,9 @@ class Agent(object):
         self.log_probs = []
         self.rewards = []
         self.entropies = []
+        self.x_restoreds = []
+        self.kls = []
+        self.states = []
         self.done = True
         self.info = None
         self.reward = 0
@@ -27,9 +30,19 @@ class Agent(object):
 
     def action_train(self):
 
-        value, logit, self.hx, self.cx = self.model(
-            self.state.unsqueeze(0), self.hx, self.cx, None
+        current_state = self.state.unsqueeze(0)
+        model_output = self.model(
+            current_state, self.hx, self.cx, None
         )
+        if len(model_output) == 4:
+            value, logit, self.hx, self.cx = model_output
+            x_restored = None
+            kl = None
+        elif len(model_output) == 5:
+            value, logit, self.hx, self.cx, x_restored = model_output
+            kl = None
+        elif len(model_output) == 6:
+            value, logit, self.hx, self.cx, x_restored, kl = model_output
         prob = F.softmax(logit, dim=1)
         log_prob = F.log_softmax(logit, dim=1)
         entropy = -(log_prob * prob).sum(1)
@@ -55,6 +68,11 @@ class Agent(object):
         self.values.append(value)
         self.log_probs.append(log_prob)
         self.rewards.append(self.reward)
+        self.states.append(current_state)
+        if x_restored is not None:
+            self.x_restoreds.append(x_restored)
+        if kl is not None:
+            self.kls.append(kl)
         return self
 
     def action_test(self):
@@ -73,9 +91,11 @@ class Agent(object):
                 if hasattr(self.model, 'prev_x_conv'):
                     self.model.prev_x_conv = None
 
-            value, logit, self.hx, self.cx = self.model(
+            model_output = self.model(
                 self.state.unsqueeze(0), self.hx, self.cx, None
             )
+            if len(model_output) >= 4:
+                value, logit, self.hx, self.cx = model_output[:4]
             prob = F.softmax(logit, dim=1)
             action = prob.cpu().numpy().argmax()
         state, self.reward, self.done, self.info = self.env.step(action)
@@ -93,4 +113,7 @@ class Agent(object):
         self.log_probs = []
         self.rewards = []
         self.entropies = []
+        self.x_restoreds = []
+        self.kls = []
+        self.states = []
         return self

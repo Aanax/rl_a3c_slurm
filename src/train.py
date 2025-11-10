@@ -10,6 +10,9 @@ import model
 from player_util import Agent
 from torch.autograd import Variable
 import time
+import pickle
+import csv
+import os
 
 def train(rank, args, shared_model, optimizer, env_conf, frames_total):
     ptitle(f"Train Agent: {rank}")
@@ -42,6 +45,17 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
         num_steps = args.distributed_step_size[rank%len(args.distributed_step_size)]
     else:
         num_steps = args.num_steps
+
+    game_count = 0
+    batch_count = 0
+    loss_csv_path = None
+    if args.monitor_losses:
+        log_dir_path = f"{args.log_dir}{args.experiment_name}/"
+        os.makedirs(log_dir_path, exist_ok=True)
+        loss_csv_path = f"{log_dir_path}losses_rank{rank}.csv"
+        with open(loss_csv_path, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(['batch_num', 'policy_loss', 'value_loss', 'kld_loss', 'restoration_loss'])
     try:
         while 1:
             if gpu_id >= 0:
@@ -67,6 +81,28 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     break
 
             if player.done:
+                game_count += 1
+                if args.monitor_s and (game_count % args.monitor_s_save_interval == 0 or game_count == 1):
+                    # Save s values for this game
+                    s_data = {
+                        'game': game_count,
+                        'rank': rank,
+                        's_values': player.model.s_values
+                    }
+                    log_dir_path = f"{args.log_dir}{args.experiment_name}/"
+                    os.makedirs(log_dir_path, exist_ok=True)
+                    save_path = f"{log_dir_path}s_monitor_{args.env}_rank{rank}_game{game_count}.pkl"
+                    print(f"Saving s monitoring data to: {save_path}")
+                    with open(save_path, 'wb') as f:
+                        pickle.dump(s_data, f)
+                    # Check if file was saved successfully
+                    if os.path.exists(save_path):
+                        print(f"S monitoring data saved successfully: {save_path}")
+                    else:
+                        print(f"ERROR: Failed to save s monitoring data to: {save_path}")
+                    # Clear s values for next games
+                player.model.s_values = []
+
                 player.eps_len = 0
                 state = player.env.reset()
                 if gpu_id >= 0:
@@ -84,9 +120,10 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 gae = torch.zeros(1, 1)
             if not player.done:
                 state = player.state
-                value, _, _, _ = player.model(
+                model_output = player.model(
                     state.unsqueeze(0), player.hx, player.cx
                 )
+                value = model_output[0]
                 R = value.detach()
             player.values.append(R)
             policy_loss = 0
@@ -110,10 +147,37 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     - (args.entropy_coef * player.entropies[i])
                 )
 
+            # Additional losses for VAE models (only compute if weights > 0)
+            kld_loss = 0
+            restoration_loss = 0
+            if args.w_kld_loss > 0 or args.w_restoration_loss > 0:
+                batch_size = len(player.rewards)
+                for i in range(len(player.rewards)):
+                    if args.w_kld_loss > 0 and len(player.kls) > i:
+                        kld_loss += args.w_kld_loss * player.kls[i]
+                    if args.w_restoration_loss > 0 and len(player.x_restoreds) > i:
+                        restoration_loss += args.w_restoration_loss * (player.x_restoreds[i] - player.states[i].detach()).pow(2).mean()
+
+            total_loss = policy_loss + 0.5 * value_loss + kld_loss + restoration_loss
+
             player.model.zero_grad()
-            (policy_loss + 0.5 * value_loss).backward()
+            total_loss.backward()
             ensure_shared_grads(player.model, shared_model, gpu=gpu_id >= 0)
             optimizer.step()
+
+            # Save losses to CSV if monitoring is enabled
+            if args.monitor_losses:
+                batch_count += 1
+                with open(loss_csv_path, 'a', newline='') as csvfile:
+                    writer = csv.writer(csvfile)
+                    writer.writerow([
+                        batch_count,
+                        policy_loss.item(),
+                        (0.5 * value_loss).item(),
+                        kld_loss.item() if isinstance(kld_loss, torch.Tensor) else kld_loss,
+                        restoration_loss.item() if isinstance(restoration_loss, torch.Tensor) else restoration_loss
+                    ])
+
             player.clear_actions()
             steps_taken = step + 1 if player.done else num_steps
             frames_total.value += steps_taken

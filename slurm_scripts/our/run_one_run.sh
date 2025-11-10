@@ -4,8 +4,9 @@
 #SBATCH -e /s/ls4/users/aamore/rl_a3c_pytorch/logs/%j.err
 #SBATCH -t 72:00:00
 #SBATCH --cpus-per-task=4
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:4
 #SBATCH -p hpc4-el7-gpu-3d
+#SBATCH --exclusive
 
 export CUDA_HOME=/s/ls4/sw/cuda/10.2/
 export LD_LIBRARY_PATH="/s/ls4/sw/cuda/10.2/lib64:$LD_LIBRARY_PATH"

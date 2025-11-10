@@ -183,6 +183,23 @@ class NormalizedEnvDiffConcat1frameNormDiffFromNormed(gym.ObservationWrapper):
         observation_diff = (observation_diff - observation_diff.mean()) / (observation_diff.std() + 1e-8)
 
         return np.concatenate([observation, observation_diff])
+    
+class NormalizedEnvDiffConcat1frameNoNormDiffFromNormed(gym.ObservationWrapper):
+    """
+    Concatenates per-frame normalized observation with unnormalized difference
+    from the previous normalized observation (difference computed after normalization).
+    """
+    def __init__(self, env=None, args=None):
+        super().__init__(env)
+        self.previous_observation = np.zeros([1, 80, 80]).astype(np.float32)
+        self.observation_space = Box(0.0, 1.0, [2, 80, 80], dtype=np.uint8)
+
+    def observation(self, observation):
+        observation = (observation - observation.mean()) / (observation.std() + 1e-8)
+        observation_diff = observation - self.previous_observation
+        self.previous_observation = np.copy(observation)
+
+        return np.concatenate([observation, observation_diff])
 
 
 class NormalizedEnvPassThrough(gym.ObservationWrapper):
@@ -210,6 +227,27 @@ class NormalizedEnvAddDiffPassThrough(gym.ObservationWrapper):
         observation_diff = observation - self.previous_observation
         self.previous_observation = np.copy(observation)
         return np.concatenate([observation, observation_diff])
+
+
+class NormalizedEnvFrameAndDiff1frameNormTogether(gym.ObservationWrapper):
+    """
+    Concatenates the current frame with the difference from the previous unnormalized frame,
+    then normalizes the entire concatenated observation by its mean and std as a whole.
+    """
+    def __init__(self, env=None, args=None):
+        super().__init__(env)
+        self.previous_observation = np.zeros([1, 80, 80]).astype(np.float32)
+        self.observation_space = Box(0.0, 1.0, [2, 80, 80], dtype=np.uint8)
+
+    def observation(self, observation):
+        observation_diff = observation - self.previous_observation
+        self.previous_observation = np.copy(observation)
+
+        # Concatenate frame and difference
+        concatenated = np.concatenate([observation, observation_diff])
+
+        # Normalize the entire concatenated observation by its mean and std
+        return (concatenated - concatenated.mean()) / (concatenated.std() + 1e-8)
 
 
 class NoopResetEnv(gym.Wrapper):
