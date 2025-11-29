@@ -4,7 +4,7 @@
 #SBATCH -e /s/ls4/users/aamore/rl_a3c_pytorch/logs/%j.err
 #SBATCH -t 72:00:00
 #SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:4
+#SBATCH --gres=gpu:2
 #SBATCH -p hpc5-el7-gpu-3d
 #SBATCH --exclusive
 
