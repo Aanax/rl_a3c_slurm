@@ -1,11 +1,107 @@
+from __future__ import absolute_import
 from __future__ import division
+from __future__ import print_function
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
 from utils import norm_col_init, weights_init
 from decoders import Decoder_AE_nobn
+from torch.nn.parameter import Parameter
+# from norms_new_torch import RMSNorm
 
+
+
+import torch
+import torch.nn as nn
+
+
+class RMSNormDetach(nn.Module):
+    def __init__(self, d, p=-1., eps=1e-8, bias=False):
+        """
+            Root Mean Square Layer Normalization
+        :param d: model size
+        :param p: partial RMSNorm, valid value [0, 1], default -1.0 (disabled)
+        :param eps:  epsilon value, default 1e-8
+        :param bias: whether use bias term for RMSNorm, disabled by
+            default because RMSNorm doesn't enforce re-centering invariance.
+        """
+        super(RMSNormDetach, self).__init__()
+
+        self.eps = eps
+        self.d = d
+        self.p = p
+        self.bias = bias
+
+        self.scale = nn.Parameter(torch.ones(d))
+        self.register_parameter("scale", self.scale)
+
+        if self.bias:
+            self.offset = nn.Parameter(torch.zeros(d))
+            self.register_parameter("offset", self.offset)
+
+    def forward(self, x):
+        if self.p < 0. or self.p > 1.:
+            norm_x = x.norm(2, dim=-1, keepdim=True) # (x1^2 + x2^2 +x3^2....)^(1/2)
+            d_x = self.d # 1024
+        else:
+            partial_size = int(self.d * self.p)
+            partial_x, _ = torch.split(x, [partial_size, self.d - partial_size], dim=-1)
+
+            norm_x = partial_x.norm(2, dim=-1, keepdim=True)
+            d_x = partial_size
+
+        rms_x = (norm_x * d_x ** (-1. / 2)).detach() # (x1^2 + x2^2 +x3^2....)^(1/2) * (1/(1024)^(1/2)) = sqrt((x1^2 + x2^2 +x3^2....)/1024)
+        x_normed = x / (rms_x + self.eps) # x / (sqrt((x1^2 + x2^2 +x3^2....)/1024) + 1e-8)
+
+        if self.bias:
+            return self.scale * x_normed + self.offset
+
+        return self.scale * x_normed
+
+class RMSNorm(nn.Module):
+    def __init__(self, d, p=-1., eps=1e-8, bias=False):
+        """
+            Root Mean Square Layer Normalization
+        :param d: model size
+        :param p: partial RMSNorm, valid value [0, 1], default -1.0 (disabled)
+        :param eps:  epsilon value, default 1e-8
+        :param bias: whether use bias term for RMSNorm, disabled by
+            default because RMSNorm doesn't enforce re-centering invariance.
+        """
+        super(RMSNorm, self).__init__()
+
+        self.eps = eps
+        self.d = d
+        self.p = p
+        self.bias = bias
+
+        self.scale = nn.Parameter(torch.ones(d))
+        self.register_parameter("scale", self.scale)
+
+        if self.bias:
+            self.offset = nn.Parameter(torch.zeros(d))
+            self.register_parameter("offset", self.offset)
+
+    def forward(self, x):
+        if self.p < 0. or self.p > 1.:
+            norm_x = x.norm(2, dim=-1, keepdim=True) # (x1^2 + x2^2 +x3^2....)^(1/2)
+            d_x = self.d # 1024
+        else:
+            partial_size = int(self.d * self.p)
+            partial_x, _ = torch.split(x, [partial_size, self.d - partial_size], dim=-1)
+
+            norm_x = partial_x.norm(2, dim=-1, keepdim=True)
+            d_x = partial_size
+
+        rms_x = (norm_x * d_x ** (-1. / 2)) # (x1^2 + x2^2 +x3^2....)^(1/2) * (1/(1024)^(1/2)) = sqrt((x1^2 + x2^2 +x3^2....)/1024)
+        x_normed = x / (rms_x + self.eps) # x / (sqrt((x1^2 + x2^2 +x3^2....)/1024) + 1e-8)
+
+        if self.bias:
+            return self.scale * x_normed + self.offset
+
+        return self.scale * x_normed
+    
 
 class Encoder(nn.Module):
     def __init__(self, num_inputs):
@@ -27,6 +123,42 @@ class Encoder(nn.Module):
 
 
 class EncoderWithRelu(Encoder):
+    def forward(self, x):
+        x = F.relu(F.max_pool2d(self.conv1(x), 2, 2))
+        x = F.relu(F.max_pool2d(self.conv2(x), 2, 2))
+        x = F.relu(F.max_pool2d(self.conv3(x), 2, 2))
+        x = F.relu(F.max_pool2d(self.conv4(x), 2, 2))
+        return x
+
+
+class EncoderOurInitRelu(nn.Module):
+    def __init__(self, num_inputs):
+        super(EncoderOurInitRelu, self).__init__()
+        self.conv1 = nn.Conv2d(num_inputs, 32, 5, stride=1, padding=2)
+        self.conv2 = nn.Conv2d(32, 32, 5, stride=1, padding=1)
+        self.conv3 = nn.Conv2d(32, 64, 4, stride=1, padding=1)
+        self.conv4 = nn.Conv2d(64, 64, 3, stride=1, padding=1)
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        convs = [self.conv1, self.conv2, self.conv3, self.conv4]
+        gain = nn.init.calculate_gain('relu')
+        for conv in convs:
+            if conv.bias is not None:
+                conv.bias.data.fill_(0)
+            fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(conv.weight)
+            if conv is self.conv4:
+                fan = fan_in + conv.out_channels  # fan_out = C_conv4 for conv4
+            elif conv is self.conv1:
+                fan = fan_in
+            else:
+                fan = fan_in + fan_out
+            if fan > 0:
+                std = gain / math.sqrt(fan)
+                bound = math.sqrt(3.0) * std
+                nn.init.uniform_(conv.weight, -bound, bound)
+
     def forward(self, x):
         x = F.relu(F.max_pool2d(self.conv1(x), 2, 2))
         x = F.relu(F.max_pool2d(self.conv2(x), 2, 2))
@@ -226,6 +358,32 @@ class EncoderConvWithFanOut1ForLastConvNoKL(nn.Module):
         return x, None, None, None
 
 
+class EncoderConvDefaultInitAbsMaxPoolSignPreserve(nn.Module):
+    def __init__(self, num_inputs, latent_dim_conv=64):
+        super().__init__()
+        self.latent_dim = latent_dim_conv
+        self.conv1 = nn.Conv2d(num_inputs, 32, 5, stride=1, padding=2)
+        self.conv2 = nn.Conv2d(32, 32, 5, stride=1, padding=1)
+        self.conv3 = nn.Conv2d(32, 64, 4, stride=1, padding=1)
+        self.conv4 = nn.Conv2d(64, latent_dim_conv, 3, stride=1, padding=1)
+        # Use default PyTorch initialization
+
+    def forward(self, x):
+        x = F.relu(F.max_pool2d(self.conv1(x), 2, 2))
+        x = F.relu(F.max_pool2d(self.conv2(x), 2, 2))
+        x = F.relu(F.max_pool2d(self.conv3(x), 2, 2))
+        x = self.conv4(x)  # No activation after conv4
+        # Max pool on abs(x) and preserve signs of selected values
+        x_abs_pooled, indices = F.max_pool2d(torch.abs(x), 2, 2, return_indices=True)
+        signs = torch.sign(x)
+        batch, channels, h, w = x.shape
+        gathered_signs = torch.gather(signs.view(batch, channels, -1), 2, indices.view(batch, channels, -1)).view_as(indices)
+        x = x_abs_pooled * gathered_signs
+
+        x = x.view(x.size(0), -1)
+        return x, None, None, None
+
+
 class EncoderConv4NormalizeChannelsFanInFanOutNoKL(nn.Module):
     def __init__(self, num_inputs, latent_dim_conv=64):
         super().__init__()
@@ -398,6 +556,186 @@ class EncoderConvAttentionAfterLastPoolCNormalizeOrder(nn.Module):
         return x, None, None, None
 
 
+class EncoderConvAttentionAfterLastPoolCNormalizeOrderSmaxT(nn.Module):
+    def __init__(self, num_inputs, latent_dim_conv=64):
+        super().__init__()
+
+        self.latent_dim = latent_dim_conv
+
+        self.conv1 = nn.Conv2d(num_inputs, 32, 5, stride=1, padding=2)
+        self.conv2 = nn.Conv2d(32, 32, 5, stride=1, padding=1)
+        self.conv3 = nn.Conv2d(32, 64, 4, stride=1, padding=1)
+        self.conv4 = nn.Conv2d(64, latent_dim_conv, 3, stride=1, padding=1)
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        convs = [self.conv1, self.conv2, self.conv3, self.conv4]
+        gain = nn.init.calculate_gain('relu')
+        for conv in convs:
+            if conv.bias is not None:
+                conv.bias.data.fill_(0)
+            fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(conv.weight)
+            if conv is self.conv4:
+                fan = fan_in + conv.out_channels  # fan_out = C_conv4 for conv4
+            elif conv is self.conv1:
+                fan = fan_in
+            else:
+                fan = fan_in + fan_out
+            if fan > 0:
+                std = gain / math.sqrt(fan)
+                bound = math.sqrt(3.0) * std
+                nn.init.uniform_(conv.weight, -bound, bound)
+
+    def apply_attention(self, x):
+        batch, n, h, w = x.shape
+        d = h * w
+        x_flat = x.view(batch, n, d)
+        scores = torch.matmul((-x_flat), x_flat.transpose(-2, -1)) / (n)**0.5
+        s = scores.sum(dim=-1)
+        sigma = F.softmax(s, dim=-1)
+        kFinal = sigma.unsqueeze(-1).unsqueeze(-1) * x
+        return kFinal
+
+    def normalize_channels(self, x):
+        norm = torch.norm(x, p=2, dim=(2, 3), keepdim=True) + 1e-8
+        return x / norm
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = F.relu(F.max_pool2d(x, 2, 2))
+        x = self.conv2(x)
+        x = F.relu(F.max_pool2d(x, 2, 2))
+        x = self.conv3(x)
+        x = F.relu(F.max_pool2d(x, 2, 2))
+        x = self.conv4(x)
+        x = F.max_pool2d(x, 2, 2)
+        x = self.normalize_channels(x)
+        x = self.apply_attention(x)
+        # No ReLU after last conv
+        x = x.view(x.size(0), -1)
+        return x, None, None, None
+
+class EncoderConvAttentionAfterLastPoolCNormalizeOrderSmaxTDetachNorm(nn.Module):
+    def __init__(self, num_inputs, latent_dim_conv=64):
+        super().__init__()
+
+        self.latent_dim = latent_dim_conv
+
+        self.conv1 = nn.Conv2d(num_inputs, 32, 5, stride=1, padding=2)
+        self.conv2 = nn.Conv2d(32, 32, 5, stride=1, padding=1)
+        self.conv3 = nn.Conv2d(32, 64, 4, stride=1, padding=1)
+        self.conv4 = nn.Conv2d(64, latent_dim_conv, 3, stride=1, padding=1)
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        convs = [self.conv1, self.conv2, self.conv3, self.conv4]
+        gain = nn.init.calculate_gain('relu')
+        for conv in convs:
+            if conv.bias is not None:
+                conv.bias.data.fill_(0)
+            fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(conv.weight)
+            if conv is self.conv4:
+                fan = fan_in + conv.out_channels  # fan_out = C_conv4 for conv4
+            elif conv is self.conv1:
+                fan = fan_in
+            else:
+                fan = fan_in + fan_out
+            if fan > 0:
+                std = gain / math.sqrt(fan)
+                bound = math.sqrt(3.0) * std
+                nn.init.uniform_(conv.weight, -bound, bound)
+
+    def apply_attention(self, x):
+        batch, n, h, w = x.shape
+        d = h * w
+        x_flat = x.view(batch, n, d)
+        scores = torch.matmul((-x_flat), x_flat.transpose(-2, -1)) / (n)**0.5
+        s = scores.sum(dim=-1)
+        sigma = F.softmax(s, dim=-1)
+        kFinal = sigma.unsqueeze(-1).unsqueeze(-1) * x
+        return kFinal
+
+    def normalize_channels(self, x):
+        norm = torch.norm(x, p=2, dim=(2, 3), keepdim=True) + 1e-8
+        return x / norm.detach()
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = F.relu(F.max_pool2d(x, 2, 2))
+        x = self.conv2(x)
+        x = F.relu(F.max_pool2d(x, 2, 2))
+        x = self.conv3(x)
+        x = F.relu(F.max_pool2d(x, 2, 2))
+        x = self.conv4(x)
+        x = F.max_pool2d(x, 2, 2)
+        x = self.normalize_channels(x)
+        x = self.apply_attention(x)
+        # No ReLU after last conv
+        x = x.view(x.size(0), -1)
+        return x, None, None, None
+
+
+class EncoderConvAttentionAfterLastPoolCNormalizeOrderLayernorm(nn.Module):
+    def __init__(self, num_inputs, latent_dim_conv=64):
+        super().__init__()
+
+        self.latent_dim = latent_dim_conv
+
+        self.conv1 = nn.Conv2d(num_inputs, 32, 5, stride=1, padding=2)
+        self.conv2 = nn.Conv2d(32, 32, 5, stride=1, padding=1)
+        self.conv3 = nn.Conv2d(32, 64, 4, stride=1, padding=1)
+        self.conv4 = nn.Conv2d(64, latent_dim_conv, 3, stride=1, padding=1)
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        convs = [self.conv1, self.conv2, self.conv3, self.conv4]
+        gain = nn.init.calculate_gain('relu')
+        for conv in convs:
+            if conv.bias is not None:
+                conv.bias.data.fill_(0)
+            fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(conv.weight)
+            if conv is self.conv4:
+                fan = fan_in + conv.out_channels  # fan_out = C_conv4 for conv4
+            elif conv is self.conv1:
+                fan = fan_in
+            else:
+                fan = fan_in + fan_out
+            if fan > 0:
+                std = gain / math.sqrt(fan)
+                bound = math.sqrt(3.0) * std
+                nn.init.uniform_(conv.weight, -bound, bound)
+
+    def apply_attention(self, x):
+        batch, n, h, w = x.shape
+        d = h * w
+        x_flat = x.view(batch, n, d)
+        scores = torch.matmul((-x_flat), x_flat.transpose(-2, -1)) / (n)**0.5
+        s = scores.sum(dim=-1)
+        sigma = F.softmax(s, dim=-1)
+        kFinal = sigma.unsqueeze(-1).unsqueeze(-1) * x
+        return kFinal
+
+    def normalize_channels(self, x):
+        norm = torch.norm(x, p=2, dim=(2, 3), keepdim=True) + 1e-8
+        return x / norm.detach()
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = F.relu(F.max_pool2d(x, 2, 2))
+        x = self.conv2(x)
+        x = F.relu(F.max_pool2d(x, 2, 2))
+        x = self.conv3(x)
+        x = F.relu(F.max_pool2d(x, 2, 2))
+        x = self.conv4(x)
+        x = F.max_pool2d(x, 2, 2)
+        x = self.normalize_channels(x)
+        x = self.apply_attention(x)
+        # No ReLU after last conv
+        x = x.view(x.size(0), -1)
+        return x, None, None, None
 
 
 class EncoderConvAttentionAfterLastPoolCNormalizeChannelNorm(nn.Module):
@@ -545,6 +883,65 @@ class EncoderConvAttentionKL(Encoder):
         kl = -0.5 * (1 + z_log_var - z_mean**2 - torch.exp(z_log_var)).mean()
 
         return z, z_mean, z_log_var, kl
+
+
+class EncoderConvAttentionAfterLastPoolCNormalizeOrderLayernorm(nn.Module):
+    def __init__(self, num_inputs, latent_dim_conv=64):
+        super().__init__()
+
+        self.latent_dim = latent_dim_conv
+
+        self.conv1 = nn.Conv2d(num_inputs, 32, 5, stride=1, padding=2)
+        self.conv2 = nn.Conv2d(32, 32, 5, stride=1, padding=1)
+        self.conv3 = nn.Conv2d(32, 64, 4, stride=1, padding=1)
+        self.conv4 = nn.Conv2d(64, latent_dim_conv, 3, stride=1, padding=1)
+
+        self.normalize_channels = nn.GroupNorm(num_groups=self.latent_dim, num_channels=self.latent_dim, affine=False)
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        convs = [self.conv1, self.conv2, self.conv3, self.conv4]
+        gain = nn.init.calculate_gain('relu')
+        for conv in convs:
+            if conv.bias is not None:
+                conv.bias.data.fill_(0)
+            fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(conv.weight)
+            if conv is self.conv4:
+                fan = fan_in + conv.out_channels  # fan_out = C_conv4 for conv4
+            elif conv is self.conv1:
+                fan = fan_in
+            else:
+                fan = fan_in + fan_out
+            if fan > 0:
+                std = gain / math.sqrt(fan)
+                bound = math.sqrt(3.0) * std
+                nn.init.uniform_(conv.weight, -bound, bound)
+
+    def apply_attention(self, x):
+        batch, n, h, w = x.shape
+        d = h * w
+        x_flat = x.view(batch, n, d)
+        scores = torch.matmul((-x_flat), x_flat.transpose(-2, -1)) / (d * n)**0.5
+        s = scores.sum(dim=-1)
+        sigma = F.softmax(s, dim=-1)
+        kFinal = sigma.unsqueeze(-1).unsqueeze(-1) * x
+        return kFinal
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = F.relu(F.max_pool2d(x, 2, 2))
+        x = self.conv2(x)
+        x = F.relu(F.max_pool2d(x, 2, 2))
+        x = self.conv3(x)
+        x = F.relu(F.max_pool2d(x, 2, 2))
+        x = self.conv4(x)
+        x = F.max_pool2d(x, 2, 2)
+        x = self.normalize_channels(x)
+        x = self.apply_attention(x)
+        # No ReLU after last conv
+        x = x.view(x.size(0), -1)
+        return x, None, None, None
 
 
 class A3Clstm(torch.nn.Module):
@@ -724,7 +1121,57 @@ class A3C1024fc(torch.nn.Module):
 
         x = F.relu(self.fc(s))
 
-        return self.critic_linear(x), self.actor_linear(x), hx, cx
+        return self.critic_linear(x), self.actor_linear(x), hx, cx, None, None
+
+
+class A3C1024fcOurInitForGameNorm(torch.nn.Module):
+    def __init__(self, num_inputs, action_space, args):
+        super(A3C1024fcOurInitForGameNorm, self).__init__()
+        self.hidden_size = args.hidden_size
+        self.monitor_s = getattr(args, 'monitor_s', False)
+        if self.monitor_s:
+            self.s_values = []
+        self.encoder = EncoderOurInitRelu(num_inputs)
+
+        num_outputs = action_space.n
+        self.critic_linear = nn.Linear(self.hidden_size, 1)
+        self.actor_linear = nn.Linear(self.hidden_size, num_outputs)
+        self.fc = nn.Linear(1024, self.hidden_size)
+
+        # Custom initialization for fc like in A3C1024fcConvAttentionAfterLastPoolCNormalizeOrderLayernorm
+        fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(self.fc.weight)
+        fan = fan_in + fan_out
+        gain = nn.init.calculate_gain("relu")
+        std = gain / math.sqrt(fan)
+        bound = math.sqrt(3.0) * std
+        with torch.no_grad():
+            self.fc.weight.uniform_(-bound, bound)
+
+        self.actor_linear.weight.data = norm_col_init(
+            self.actor_linear.weight.data, 0.01
+        )
+        self.actor_linear.bias.data.fill_(0)
+        self.critic_linear.weight.data = norm_col_init(
+            self.critic_linear.weight.data, 1.0
+        )
+        self.critic_linear.bias.data.fill_(0)
+
+        self.train()
+
+    def forward(self, inputs, hx, cx, mem=None):
+        x = self.encoder(inputs)
+
+        s = x.view(x.size(0), -1)
+
+        if self.monitor_s:
+            self.s_values.append(s.detach().cpu())
+
+        hx = torch.Tensor([0])
+        cx = torch.Tensor([0])
+
+        x = F.relu(self.fc(s))
+
+        return self.critic_linear(x), self.actor_linear(x), hx, cx, None, None
 
 
 class A3C1024fcLN(A3C1024fc):
@@ -1012,6 +1459,179 @@ class A3C1024fcConvKLNormSLen(A3C1024fcConvKL):
         return self.critic_linear(x), self.actor_linear(x), hx, cx, None, None
 
 
+class EncoderConvAttentionAfterLastPoolCNormalizeCenterOrderSmaxT(nn.Module):
+    def __init__(self, num_inputs, latent_dim_conv=64):
+        super().__init__()
+
+        self.latent_dim = latent_dim_conv
+
+        self.conv1 = nn.Conv2d(num_inputs, 32, 5, stride=1, padding=2)
+        self.conv2 = nn.Conv2d(32, 32, 5, stride=1, padding=1)
+        self.conv3 = nn.Conv2d(32, 64, 4, stride=1, padding=1)
+        self.conv4 = nn.Conv2d(64, latent_dim_conv, 3, stride=1, padding=1)
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        convs = [self.conv1, self.conv2, self.conv3, self.conv4]
+        gain = nn.init.calculate_gain('relu')
+        for conv in convs:
+            if conv.bias is not None:
+                conv.bias.data.fill_(0)
+            fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(conv.weight)
+            if conv is self.conv4:
+                fan = fan_in + conv.out_channels  # fan_out = C_conv4 for conv4
+            elif conv is self.conv1:
+                fan = fan_in
+            else:
+                fan = fan_in + fan_out
+            if fan > 0:
+                std = gain / math.sqrt(fan)
+                bound = math.sqrt(3.0) * std
+                nn.init.uniform_(conv.weight, -bound, bound)
+
+    def apply_attention(self, x):
+        batch, n, h, w = x.shape
+        d = h * w
+        x_flat = x.view(batch, n, d)
+        scores = torch.matmul((-x_flat), x_flat.transpose(-2, -1)) / (n)**0.5
+        s = scores.sum(dim=-1)
+        sigma = F.softmax(s, dim=-1)
+        kFinal = sigma.unsqueeze(-1).unsqueeze(-1) * x
+        return kFinal
+
+    def normalize_centering_channels(self, x):
+        mean_per_channel = x.mean(dim=(0, 2, 3), keepdim=True)
+        x_centered = x - mean_per_channel
+        norm_per_channel = torch.norm(x_centered, p=2, dim=(0, 2, 3), keepdim=True) + 1e-8
+        return x_centered / norm_per_channel
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = F.relu(F.max_pool2d(x, 2, 2))
+        x = self.conv2(x)
+        x = F.relu(F.max_pool2d(x, 2, 2))
+        x = self.conv3(x)
+        x = F.relu(F.max_pool2d(x, 2, 2))
+        x = self.conv4(x)
+        x = F.max_pool2d(x, 2, 2)
+        x = self.normalize_centering_channels(x)
+        x = self.apply_attention(x)
+        # No ReLU after last conv
+        x = x.view(x.size(0), -1)
+        return x, None, None, None
+
+class EncoderConvAttentionAfterLastPoolCNormalizeCenterOrder(nn.Module):
+    def __init__(self, num_inputs, latent_dim_conv=64):
+        super().__init__()
+
+        self.latent_dim = latent_dim_conv
+
+        self.conv1 = nn.Conv2d(num_inputs, 32, 5, stride=1, padding=2)
+        self.conv2 = nn.Conv2d(32, 32, 5, stride=1, padding=1)
+        self.conv3 = nn.Conv2d(32, 64, 4, stride=1, padding=1)
+        self.conv4 = nn.Conv2d(64, latent_dim_conv, 3, stride=1, padding=1)
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        convs = [self.conv1, self.conv2, self.conv3, self.conv4]
+        gain = nn.init.calculate_gain('relu')
+        for conv in convs:
+            if conv.bias is not None:
+                conv.bias.data.fill_(0)
+            fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(conv.weight)
+            if conv is self.conv4:
+                fan = fan_in + conv.out_channels  # fan_out = C_conv4 for conv4
+            elif conv is self.conv1:
+                fan = fan_in
+            else:
+                fan = fan_in + fan_out
+            if fan > 0:
+                std = gain / math.sqrt(fan)
+                bound = math.sqrt(3.0) * std
+                nn.init.uniform_(conv.weight, -bound, bound)
+
+    def apply_attention(self, x):
+        batch, n, h, w = x.shape
+        d = h * w
+        x_flat = x.view(batch, n, d)
+        scores = torch.matmul((-x_flat), x_flat.transpose(-2, -1)) / (n*d)**0.5
+        s = scores.sum(dim=-1)
+        sigma = F.softmax(s, dim=-1)
+        kFinal = sigma.unsqueeze(-1).unsqueeze(-1) * x
+        return kFinal
+
+    def normalize_centering_channels(self, x):
+        mean_per_channel = x.mean(dim=(0, 2, 3), keepdim=True)
+        x_centered = x - mean_per_channel
+        norm_per_channel = torch.norm(x_centered, p=2, dim=(0, 2, 3), keepdim=True) + 1e-8
+        return x_centered / norm_per_channel
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = F.relu(F.max_pool2d(x, 2, 2))
+        x = self.conv2(x)
+        x = F.relu(F.max_pool2d(x, 2, 2))
+        x = self.conv3(x)
+        x = F.relu(F.max_pool2d(x, 2, 2))
+        x = self.conv4(x)
+        x = F.max_pool2d(x, 2, 2)
+        x = self.normalize_centering_channels(x)
+        x = self.apply_attention(x)
+        # No ReLU after last conv
+        x = x.view(x.size(0), -1)
+        return x, None, None, None
+
+
+class EncoderGramSchmidt(nn.Module):
+    def __init__(self, num_inputs):
+        super(EncoderGramSchmidt, self).__init__()
+        self.conv1 = nn.Conv2d(num_inputs, 32, 5, stride=1, padding=2)
+        self.conv2 = nn.Conv2d(32, 32, 5, stride=1, padding=1)
+        self.conv3 = nn.Conv2d(32, 64, 4, stride=1, padding=1)
+        self.conv4 = nn.Conv2d(64, 64, 3, stride=1, padding=1)
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        convs = [self.conv1, self.conv2, self.conv3, self.conv4]
+        for conv in convs:
+            if conv.bias is not None:
+                conv.bias.data.fill_(0)
+            # Initialize weights randomly first
+            nn.init.kaiming_uniform_(conv.weight, nonlinearity='relu')
+            if conv is self.conv4:
+                # Then apply Gram-Schmidt to make channels orthogonal
+                W = conv.weight.data
+                out_c, in_c, kH, kW = W.shape
+                W_flat = W.view(out_c, -1)  # (out_c, in_c * kH * kW)
+                D = W_flat.shape[1]
+                # Apply QR decomposition to get orthonormal rows
+                Q, R = torch.qr(W_flat.T)
+                W_flat = Q.T
+                # Multiply by sqrt(3)
+                W_flat = W_flat * math.sqrt(3)
+                conv.weight.data = W_flat.view(out_c, in_c, kH, kW)
+
+    def forward(self, x):
+        x = F.relu(F.max_pool2d(self.conv1(x), 2, 2))
+        x = F.relu(F.max_pool2d(self.conv2(x), 2, 2))
+        x = F.relu(F.max_pool2d(self.conv3(x), 2, 2))
+        x = F.relu(F.max_pool2d(self.conv4(x), 2, 2))
+        return x
+
+class EncoderGramSchmidtOrtho(EncoderGramSchmidt):
+    def orthogonalize_conv4(self):
+        W = self.conv4.weight.data
+        out_c, in_c, kH, kW = W.shape
+        W_flat = W.view(out_c, -1)  # (out_c, in_c * kH * kW)
+        D = W_flat.shape[1]
+        # Apply QR decomposition to get orthonormal rows
+        Q, R = torch.qr(W_flat.T)
+        W_flat = Q.T
+        self.conv4.weight.data = W_flat.view(out_c, in_c, kH, kW)
+
 class A3C1024fcNormalizeChannelsFanInFanOut(A3C1024fcConvKL):
     """ A3C1024fc with EncoderConvNormalizeChannelsFanInFanOutNoKL, s vector normalized by its Euclidean length without detaching norm, and fan_in for fc set to encoder out num channels """
     def __init__(self, num_inputs, action_space, args):
@@ -1140,3 +1760,925 @@ class A3C1024fcConvAttentionAfterLastPoolCNormalizeOrder(A3C1024fcConvKL):
         x = F.relu(self.fc(s_norm))
 
         return self.critic_linear(x), self.actor_linear(x), hx, cx, None, None
+
+class A3C1024fcConvAttentionAfterLastPoolCNormalizeOrderSmaxT(A3C1024fcConvKL):
+    """ A3C1024fc with EncoderConvAttentionAfterLastPoolCNormalizeOrderSmaxT """
+    def __init__(self, num_inputs, action_space, args):
+        super().__init__(num_inputs, action_space, args)
+        self.encoder = EncoderConvAttentionAfterLastPoolCNormalizeOrderSmaxT(num_inputs, latent_dim_conv=64)
+        # Custom initialization
+        fan_in = self.encoder.latent_dim  # num out channels of previous (encoder)
+        _, fan_out = nn.init._calculate_fan_in_and_fan_out(self.fc.weight)
+        fan = fan_in + fan_out
+        gain = nn.init.calculate_gain("relu")
+        std = gain / math.sqrt(fan)
+        bound = math.sqrt(3.0) * std
+        with torch.no_grad():
+            self.fc.weight.uniform_(-bound, bound)
+
+    def forward(self, inputs, hx, cx, mem=None):
+        z, z_mean, z_log_var, kl = self.encoder(inputs)
+
+        z_flat = z.view(z.size(0), -1)
+        s_norm = z_flat
+
+        if self.monitor_s:
+            self.s_values.append(s_norm.detach().cpu())
+
+        hx = torch.Tensor([0])
+        cx = torch.Tensor([0])
+
+        x = F.relu(self.fc(s_norm))
+
+        return self.critic_linear(x), self.actor_linear(x), hx, cx, None, None
+    
+class A3C1024fcConvAttentionAfterLastPoolCNormalizeOrderSmaxTDetDetachNorm(A3C1024fcConvKL):
+    """ A3C1024fc with EncoderConvAttentionAfterLastPoolCNormalizeOrderSmaxTDetachNorm """
+    def __init__(self, num_inputs, action_space, args):
+        super().__init__(num_inputs, action_space, args)
+        self.encoder = EncoderConvAttentionAfterLastPoolCNormalizeOrderSmaxTDetachNorm(num_inputs, latent_dim_conv=64)
+        # Custom initialization
+        fan_in = self.encoder.latent_dim  # num out channels of previous (encoder)
+        _, fan_out = nn.init._calculate_fan_in_and_fan_out(self.fc.weight)
+        fan = fan_in + fan_out
+        gain = nn.init.calculate_gain("relu")
+        std = gain / math.sqrt(fan)
+        bound = math.sqrt(3.0) * std
+        with torch.no_grad():
+            self.fc.weight.uniform_(-bound, bound)
+
+    def forward(self, inputs, hx, cx, mem=None):
+        z, z_mean, z_log_var, kl = self.encoder(inputs)
+
+        z_flat = z.view(z.size(0), -1)
+        s_norm = z_flat
+
+        if self.monitor_s:
+            self.s_values.append(s_norm.detach().cpu())
+
+        hx = torch.Tensor([0])
+        cx = torch.Tensor([0])
+
+        x = F.relu(self.fc(s_norm))
+
+        return self.critic_linear(x), self.actor_linear(x), hx, cx, None, None
+
+
+class A3C1024fcConvAttentionAfterLastPoolCNormalizeOrderLayernorm(A3C1024fcConvKL):
+    """ A3C1024fc with EncoderConvAttentionAfterLastPoolCNormalizeOrderLayernorm """
+    def __init__(self, num_inputs, action_space, args):
+        super().__init__(num_inputs, action_space, args)
+        self.encoder = EncoderConvAttentionAfterLastPoolCNormalizeOrderLayernorm(num_inputs, latent_dim_conv=64)
+        # Custom initialization
+        # fan_in = self.encoder.latent_dim  # num out channels of previous (encoder)
+        fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(self.fc.weight)
+        fan = fan_in + fan_out
+        gain = nn.init.calculate_gain("relu")
+        std = gain / math.sqrt(fan)
+        bound = math.sqrt(3.0) * std
+        with torch.no_grad():
+            self.fc.weight.uniform_(-bound, bound)
+
+    def forward(self, inputs, hx, cx, mem=None):
+        z, z_mean, z_log_var, kl = self.encoder(inputs)
+
+        z_flat = z.view(z.size(0), -1)
+        s_norm = z_flat
+
+        if self.monitor_s:
+            self.s_values.append(s_norm.detach().cpu())
+
+        hx = torch.Tensor([0])
+        cx = torch.Tensor([0])
+
+        x = F.relu(self.fc(s_norm))
+
+        return self.critic_linear(x), self.actor_linear(x), hx, cx, None, None
+
+class A3C1024fcConvAttentionAfterLastPoolCNormalizeCenterOrderSmaxT(A3C1024fcConvKL):
+    """ A3C1024fc with EncoderConvAttentionAfterLastPoolCNormalizeCenterOrderSmaxT """
+    def __init__(self, num_inputs, action_space, args):
+        super().__init__(num_inputs, action_space, args)
+        self.encoder = EncoderConvAttentionAfterLastPoolCNormalizeCenterOrderSmaxT(num_inputs, latent_dim_conv=64)
+        # Custom initialization
+        fan_in = self.encoder.latent_dim  # num out channels of previous (encoder)
+        _, fan_out = nn.init._calculate_fan_in_and_fan_out(self.fc.weight)
+        fan = fan_in + fan_out
+        gain = nn.init.calculate_gain("relu")
+        std = gain / math.sqrt(fan)
+        bound = math.sqrt(3.0) * std
+        with torch.no_grad():
+            self.fc.weight.uniform_(-bound, bound)
+
+    def forward(self, inputs, hx, cx, mem=None):
+        z, z_mean, z_log_var, kl = self.encoder(inputs)
+
+        z_flat = z.view(z.size(0), -1)
+        s_norm = z_flat
+
+        if self.monitor_s:
+            self.s_values.append(s_norm.detach().cpu())
+
+        hx = torch.Tensor([0])
+        cx = torch.Tensor([0])
+
+        x = F.relu(self.fc(s_norm))
+
+        return self.critic_linear(x), self.actor_linear(x), hx, cx, None, None
+
+class A3C1024fcConvAttentionAfterLastPoolCNormalizeCenterOrder(A3C1024fcConvKL):
+    """ A3C1024fc with EncoderConvAttentionAfterLastPoolCNormalizeCenterOrder """
+    def __init__(self, num_inputs, action_space, args):
+        super().__init__(num_inputs, action_space, args)
+        self.encoder = EncoderConvAttentionAfterLastPoolCNormalizeCenterOrder(num_inputs, latent_dim_conv=64)
+        # Custom initialization
+        fan_in = self.encoder.latent_dim  # num out channels of previous (encoder)
+        _, fan_out = nn.init._calculate_fan_in_and_fan_out(self.fc.weight)
+        fan = fan_in + fan_out
+        gain = nn.init.calculate_gain("relu")
+        std = gain / math.sqrt(fan)
+        bound = math.sqrt(3.0) * std
+        with torch.no_grad():
+            self.fc.weight.uniform_(-bound, bound)
+
+    def forward(self, inputs, hx, cx, mem=None):
+        z, z_mean, z_log_var, kl = self.encoder(inputs)
+
+        z_flat = z.view(z.size(0), -1)
+        s_norm = z_flat
+
+        if self.monitor_s:
+            self.s_values.append(s_norm.detach().cpu())
+
+        hx = torch.Tensor([0])
+        cx = torch.Tensor([0])
+
+        x = F.relu(self.fc(s_norm))
+
+        return self.critic_linear(x), self.actor_linear(x), hx, cx, None, None
+    
+class A3C1024fcConvKLNormSLenCentered(A3C1024fcConvKL):
+    """ A3C1024fcConvKL with s vector normalized by its Euclidean length """
+    def __init__(self, num_inputs, action_space, args):
+        super(A3C1024fcConvKLNormSLenCentered, self).__init__(num_inputs, action_space, args)
+        self.encoder = EncoderConvWithFanOut1ForLastConvNoKL(num_inputs, latent_dim_conv=64)
+        # self.fc = nn.Linear(self.encoder.latent_dim * 5 * 5, self.hidden_size)
+        # torch.nn.init.kaiming_uniform_(self.fc.weight, nonlinearity="relu")
+
+        fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(self.fc.weight)
+        fan = 1 + fan_out
+        gain = nn.init.calculate_gain("relu")
+        std = gain / math.sqrt(fan)
+        bound = math.sqrt(3.0) * std  # Calculate uniform bounds from standard deviation
+        generator = torch.Generator()
+        with torch.no_grad():
+            self.fc.weight.uniform_(-bound, bound, generator=generator)
+
+    def forward(self, inputs, hx, cx, mem=None):
+        z, z_mean, z_log_var, kl = self.encoder(inputs)
+
+        z_flat = z.view(z.size(0), -1)
+        s_centered = z_flat - z_flat.mean(dim=1, keepdim=True)
+        s_norm = s_centered / (torch.norm(s_centered, p=2, dim=1, keepdim=True) + 1e-8).detach()
+
+        if self.monitor_s:
+            self.s_values.append(s_norm.detach().cpu())
+
+        hx = torch.Tensor([0])
+        cx = torch.Tensor([0])
+
+        x = F.relu(self.fc(s_norm))
+
+        return self.critic_linear(x), self.actor_linear(x), hx, cx, None, None
+
+
+class A3C1024fcGS(A3C1024fc):
+    """ A3C1024fc with EncoderGramSchmidt using Gram-Schmidt initialization for orthogonal convolution channels """
+    def __init__(self, num_inputs, action_space, args):
+        super(A3C1024fcGS, self).__init__(num_inputs, action_space, args)
+        self.encoder = EncoderGramSchmidt(num_inputs)
+
+class EncoderGramSchmidtOrthoNormConv4(EncoderGramSchmidtOrtho):
+    def __init__(self, num_inputs):
+        super().__init__(num_inputs)
+
+    def forward(self, x):
+        x = F.relu(F.max_pool2d(self.conv1(x), 2, 2))
+        x = F.relu(F.max_pool2d(self.conv2(x), 2, 2))
+        x = F.relu(F.max_pool2d(self.conv3(x), 2, 2))
+        # Normalize conv4 weights channel-wise
+        weight = self.conv4.weight
+        norm = torch.norm(weight, p=2, dim=(1, 2, 3), keepdim=True) + 1e-8  # (64, 1, 1, 1)
+        normalized_weight = weight / norm
+        x = F.conv2d(x, normalized_weight, self.conv4.bias, self.conv4.stride, self.conv4.padding, self.conv4.dilation, self.conv4.groups)
+        x = F.relu(F.max_pool2d(x, 2, 2))
+        return x
+
+
+class A3C1024fcGSOrtho(A3C1024fcGS):
+    """ A3C1024fcGS with orthogonalization of conv4 after each optimizer step """
+    def __init__(self, num_inputs, action_space, args):
+        super(A3C1024fcGSOrtho, self).__init__(num_inputs, action_space, args)
+        self.encoder = EncoderGramSchmidtOrtho(num_inputs)
+
+    def orthogonalize_conv4(self):
+        self.encoder.orthogonalize_conv4()
+
+
+class A3C1024fcGSOrthoNormConv4(A3C1024fcGSOrtho):
+    """ A3C1024fcGSOrtho with channel-wise normalized conv4 weights """
+    def __init__(self, num_inputs, action_space, args):
+        super().__init__(num_inputs, action_space, args)
+        self.encoder = EncoderGramSchmidtOrthoNormConv4(num_inputs)
+
+
+class EncoderGramSchmidtOrthoNormConv4NoRelu(EncoderGramSchmidtOrtho):
+    def __init__(self, num_inputs):
+        super().__init__(num_inputs)
+
+    def forward(self, x):
+        x = F.relu(F.max_pool2d(self.conv1(x), 2, 2))
+        x = F.relu(F.max_pool2d(self.conv2(x), 2, 2))
+        x = F.relu(F.max_pool2d(self.conv3(x), 2, 2))
+        # Normalize conv4 weights channel-wise
+        weight = self.conv4.weight
+        norm = torch.norm(weight, p=2, dim=(1, 2, 3), keepdim=True) + 1e-8  # (64, 1, 1, 1)
+        normalized_weight = weight / norm
+        x = F.conv2d(x, normalized_weight, self.conv4.bias, self.conv4.stride, self.conv4.padding, self.conv4.dilation, self.conv4.groups)
+        x = F.max_pool2d(x, 2, 2)  # No relu here
+        return x
+
+
+class A3C1024fcGSOrthoNormConv4NoRelu(A3C1024fcGSOrtho):
+    """ A3C1024fcGSOrthoNormConv4 without relu on conv4 """
+    def __init__(self, num_inputs, action_space, args):
+        super().__init__(num_inputs, action_space, args)
+        self.encoder = EncoderGramSchmidtOrthoNormConv4NoRelu(num_inputs)
+
+class A3C1024fcConvDefaultInitAbsMaxPoolSignPreserve(A3C1024fcConvKL):
+    """ A3C1024fc with EncoderConvDefaultInitAbsMaxPoolSignPreserve """
+    def __init__(self, num_inputs, action_space, args):
+        super().__init__(num_inputs, action_space, args)
+        self.encoder = EncoderConvDefaultInitAbsMaxPoolSignPreserve(num_inputs, latent_dim_conv=64)
+        # Adjust fc for the flattened conv latent space: 64 * 5 * 5 = 1600
+        self.fc = nn.Linear(1024, self.hidden_size)
+        torch.nn.init.kaiming_uniform_(self.fc.weight, nonlinearity="relu")
+
+    def forward(self, inputs, hx, cx, mem=None):
+        z, z_mean, z_log_var, kl = self.encoder(inputs)
+
+        z_flat = z.view(z.size(0), -1)
+
+        if self.monitor_s:
+            self.s_values.append(z_flat.detach().cpu())
+
+        hx = torch.Tensor([0])
+        cx = torch.Tensor([0])
+
+        x = F.tanh(self.fc(z_flat))
+
+        return self.critic_linear(x), self.actor_linear(x), hx, cx, None, None
+
+
+class EncoderRules234(nn.Module):
+    def __init__(self, num_inputs, latent_dim_conv=64, use_rmsnorm=False):
+        super(EncoderRules234, self).__init__()
+        self.use_rmsnorm = use_rmsnorm
+        self.conv1 = nn.Conv2d(num_inputs, 32, 5, stride=1, padding=2)
+        self.conv2 = nn.Conv2d(32, 32, 5, stride=1, padding=1)
+        self.conv3 = nn.Conv2d(32, 64, 4, stride=1, padding=1)
+        self.conv4 = nn.Conv2d(64, latent_dim_conv, 3, stride=1, padding=1)
+
+        self.rmsnorm = RMSNorm((1024))
+
+        # factory_kwargs = {"device": device, "dtype": dtype}
+
+        # self.RMS_weight = Parameter(
+        #         torch.ones(1,1024) #, **factory_kwargs)
+        #     )
+        # self.register_parameter("RMS_weight", self.RMS_weight)
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        convs = [self.conv1, self.conv2, self.conv3, self.conv4]
+        gain = nn.init.calculate_gain('relu')
+        for conv in convs:
+            if conv.bias is not None:
+                conv.bias.data.fill_(0)
+            fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(conv.weight)
+            if conv is self.conv1:
+                fan = fan_in
+            else:
+                fan = (fan_in + fan_out) / 2
+
+            if fan > 0:
+                std = gain / math.sqrt(fan)
+                bound = math.sqrt(3.0) * std
+                nn.init.uniform_(conv.weight, -bound, bound)
+
+    # def rmsnorm_per_channel(self, x):
+    #     # RMSNorm each channel separately: normalize over spatial dims (H, W)
+    #     rms = torch.sqrt(torch.mean(x**2, dim=(2, 3), keepdim=True) + 1e-8)
+    #     return x / rms
+
+    # def rmsnorm_whole(self, x):
+    #     x_flat = x.view(x.size(0), -1)
+    #     rms = torch.sqrt(torch.mean(x_flat**2) + 1e-8).detach()
+    #     return (x_flat / rms) * self.RMS_weight
+
+    def forward(self, x):
+        # Rule 2: 3 conv-relu-maxpool layers
+        x = F.relu(F.max_pool2d(self.conv1(x), 2, 2))
+        x = F.relu(F.max_pool2d(self.conv2(x), 2, 2))
+        x = F.relu(F.max_pool2d(self.conv3(x), 2, 2))
+        # Rule 3: conv4-relu-maxpool
+        x = F.relu(F.max_pool2d(self.conv4(x), 2, 2))
+
+        # Rule 4: RMS-norm (optional) - normalize each channel separately
+        if self.use_rmsnorm:
+            # x = self.rmsnorm_whole(x)
+            x = x.view(x.size(0),-1)
+            x = self.rmsnorm(x)
+
+        return x, None, None, None
+
+
+class EncoderRules234Detach(nn.Module):
+    def __init__(self, num_inputs, latent_dim_conv=64, use_rmsnorm=False):
+        super(EncoderRules234Detach, self).__init__()
+        self.use_rmsnorm = use_rmsnorm
+        self.conv1 = nn.Conv2d(num_inputs, 32, 5, stride=1, padding=2)
+        self.conv2 = nn.Conv2d(32, 32, 5, stride=1, padding=1)
+        self.conv3 = nn.Conv2d(32, 64, 4, stride=1, padding=1)
+        self.conv4 = nn.Conv2d(64, latent_dim_conv, 3, stride=1, padding=1)
+
+        self.rmsnorm = RMSNormDetach((1024))
+
+        # factory_kwargs = {"device": device, "dtype": dtype}
+
+        # self.RMS_weight = Parameter(
+        #         torch.ones(1,1024) #, **factory_kwargs)
+        #     )
+        # self.register_parameter("RMS_weight", self.RMS_weight)
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        convs = [self.conv1, self.conv2, self.conv3, self.conv4]
+        gain = nn.init.calculate_gain('relu')
+        for conv in convs:
+            if conv.bias is not None:
+                conv.bias.data.fill_(0)
+            fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(conv.weight)
+            if conv is self.conv1:
+                fan = fan_in
+            else:
+                fan = (fan_in + fan_out) / 2
+
+            if fan > 0:
+                std = gain / math.sqrt(fan)
+                bound = math.sqrt(3.0) * std
+                nn.init.uniform_(conv.weight, -bound, bound)
+
+    # def rmsnorm_per_channel(self, x):
+    #     # RMSNorm each channel separately: normalize over spatial dims (H, W)
+    #     rms = torch.sqrt(torch.mean(x**2, dim=(2, 3), keepdim=True) + 1e-8)
+    #     return x / rms
+
+    # def rmsnorm_whole(self, x):
+    #     x_flat = x.view(x.size(0), -1)
+    #     rms = torch.sqrt(torch.mean(x_flat**2) + 1e-8).detach()
+    #     return (x_flat / rms) * self.RMS_weight
+
+    def forward(self, x):
+        # Rule 2: 3 conv-relu-maxpool layers
+        x = F.relu(F.max_pool2d(self.conv1(x), 2, 2))
+        x = F.relu(F.max_pool2d(self.conv2(x), 2, 2))
+        x = F.relu(F.max_pool2d(self.conv3(x), 2, 2))
+        # Rule 3: conv4-relu-maxpool
+        x = F.relu(F.max_pool2d(self.conv4(x), 2, 2))
+
+        # Rule 4: RMS-norm (optional) - normalize each channel separately
+        if self.use_rmsnorm:
+            # x = self.rmsnorm_whole(x)
+            x = x.view(x.size(0),-1)
+            x = self.rmsnorm(x)
+
+        return x, None, None, None
+
+
+
+class A3CRules2378(nn.Module):
+    def __init__(self, num_inputs, action_space, args):
+        super(A3CRules2378, self).__init__()
+        self.hidden_size = args.hidden_size
+        self.monitor_s = getattr(args, 'monitor_s', False)
+        if self.monitor_s:
+            self.s_values = []
+        
+        use_rmsnorm = getattr(args, 'use_rmsnorm', False)
+        self.encoder = EncoderRules234(num_inputs, latent_dim_conv=64, use_rmsnorm=use_rmsnorm)
+
+        num_outputs = action_space.n
+        # Rule 7: relu-fc
+        self.fc = nn.Linear(1024, self.hidden_size)
+        # Rule 8: linear value&actor heads
+        self.critic_linear = nn.Linear(self.hidden_size, 1)
+        self.actor_linear = nn.Linear(self.hidden_size, num_outputs)
+
+        # Custom initialization for fc
+        fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(self.fc.weight)
+        fan = (fan_in + fan_out) / 2
+        gain = nn.init.calculate_gain("relu")
+        std = gain / math.sqrt(fan)
+        bound = math.sqrt(3.0) * std
+        with torch.no_grad():
+            self.fc.weight.uniform_(-bound, bound)
+        self.fc.bias.data.fill_(0)
+
+        # Heads initialization Rule 8: gaussian init with only fan_in
+        for linear in [self.critic_linear, self.actor_linear]:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
+            std = 1.0 / math.sqrt(fan_in)
+            nn.init.normal_(linear.weight, mean=0.0, std=std)
+            linear.bias.data.fill_(0)
+
+        self.actor_linear.weight.data.mul_(0.01)
+        self.critic_linear.weight.data.mul_(1.0)
+
+        self.train()
+
+    def forward(self, inputs, hx, cx, mem=None):
+        x, _, _, _ = self.encoder(inputs)
+
+        s = x.view(x.size(0), -1)
+
+        if self.monitor_s:
+            self.s_values.append(s.detach().cpu())
+
+        hx = torch.Tensor([0])
+        cx = torch.Tensor([0])
+
+        # Rule 7: relu-fc
+        x = F.relu(self.fc(s))
+
+        # Rule 8: linear heads
+        return self.critic_linear(x), self.actor_linear(x), hx, cx, None, None
+
+# I. Architecture pipeline:
+# 1) alpha(0.999)-norm - 2) 3 conv-relu-maxpool layers - 3) conv4-relu-maxpool - 4) RMS-norm (optional) - 5) pixel-wise softmax=a_i - 6) conv4_out=s_i*a_i*sqrt(channel_num) - 7) relu-fc - 8) linear value&actor heads.
+# II. Weight initialization is as in baseline.
+# III. GS normalization of conv4-layer weights (including weight change ranging) is optional (to do in experiments after main programm).
+
+
+class EncoderRules23456(EncoderRules234):
+    def forward(self, x):
+        # Rule 2: 3 conv-relu-maxpool layers
+        x = F.relu(F.max_pool2d(self.conv1(x), 2, 2))
+        x = F.relu(F.max_pool2d(self.conv2(x), 2, 2))
+        x = F.relu(F.max_pool2d(self.conv3(x), 2, 2))
+        # Rule 3: conv4-relu-maxpool
+        x = F.relu(F.max_pool2d(self.conv4(x), 2, 2))
+
+        # Rule 5: pixel-wise softabsmax across channels
+        # x_abs = torch.abs(x)
+        coef = F.softmax(x, dim=1)  # softmax on abs values across channels
+
+        # Rule 6: multiply each pixel by coef and sqrt(channel_num)
+        channel_num = x.shape[1]
+        sqrt_channel_num = math.sqrt(channel_num)
+        x = coef * x * sqrt_channel_num
+
+        # Rule 4: RMS-norm (optional) - normalize each channel separately
+        if self.use_rmsnorm:
+            # x = self.rmsnorm_per_channel(x)
+            x = x.view(x.size(0),-1)
+            x = self.rmsnorm(x)
+
+        return x, None, None, None
+
+class EncoderRules23456LayerNorm(EncoderRules234):
+    def __init__(self, num_inputs, latent_dim_conv=64, use_rmsnorm=False):
+        super().__init__(num_inputs, latent_dim_conv, use_rmsnorm)
+        # Replace RMSNorm with LayerNorm
+        self.layernorm = nn.LayerNorm(1024)
+
+    def forward(self, x):
+        # Rule 2: 3 conv-relu-maxpool layers
+        x = F.relu(F.max_pool2d(self.conv1(x), 2, 2))
+        x = F.relu(F.max_pool2d(self.conv2(x), 2, 2))
+        x = F.relu(F.max_pool2d(self.conv3(x), 2, 2))
+        # Rule 3: conv4-relu-maxpool
+        x = F.relu(F.max_pool2d(self.conv4(x), 2, 2))
+
+        # Rule 5: pixel-wise softabsmax across channels
+        # x_abs = torch.abs(x)
+        coef = F.softmax(x, dim=1)  # softmax on abs values across channels
+
+        # Rule 6: multiply each pixel by coef and sqrt(channel_num)
+        channel_num = x.shape[1]
+        sqrt_channel_num = math.sqrt(channel_num)
+        x = coef * x * sqrt_channel_num
+
+        # Rule 4: LayerNorm instead of RMS-norm
+        if self.use_rmsnorm:  # Reuse the use_rmsnorm flag to control LayerNorm
+            x = x.view(x.size(0), -1)
+            x = self.layernorm(x)
+
+        return x, None, None, None
+
+
+class A3CRules23478(nn.Module):
+    def __init__(self, num_inputs, action_space, args):
+        super(A3CRules23478, self).__init__()
+        self.hidden_size = args.hidden_size
+        self.monitor_s = getattr(args, 'monitor_s', False)
+        if self.monitor_s:
+            self.s_values = []
+        
+        use_rmsnorm = getattr(args, 'use_rmsnorm', True)
+        self.encoder = EncoderRules234(num_inputs, latent_dim_conv=64, use_rmsnorm=use_rmsnorm)
+
+        num_outputs = action_space.n
+        # Rule 7: relu-fc
+        self.fc = nn.Linear(1024, self.hidden_size)
+        # Rule 8: linear value&actor heads
+        self.critic_linear = nn.Linear(self.hidden_size, 1)
+        self.actor_linear = nn.Linear(self.hidden_size, num_outputs)
+
+        # Custom initialization for fc
+        fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(self.fc.weight)
+        fan = (fan_in + fan_out) / 2
+        gain = nn.init.calculate_gain("relu")
+        std = gain / math.sqrt(fan)
+        bound = math.sqrt(3.0) * std
+        with torch.no_grad():
+            self.fc.weight.uniform_(-bound, bound)
+        self.fc.bias.data.fill_(0)
+
+        # Heads initialization Rule 8: gaussian init with only fan_in
+        for linear in [self.critic_linear, self.actor_linear]:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
+            std = 1.0 / math.sqrt(fan_in)
+            nn.init.normal_(linear.weight, mean=0.0, std=std)
+            linear.bias.data.fill_(0)
+
+        self.actor_linear.weight.data.mul_(0.01)
+        self.critic_linear.weight.data.mul_(1.0)
+
+        self.train()
+
+    def forward(self, inputs, hx, cx, mem=None):
+        x, _, _, _ = self.encoder(inputs)
+
+        s = x.view(x.size(0), -1)
+
+        if self.monitor_s:
+            self.s_values.append(s.detach().cpu())
+
+        hx = torch.Tensor([0])
+        cx = torch.Tensor([0])
+
+        # Rule 7: relu-fc
+        x = F.relu(self.fc(s))
+
+        # Rule 8: linear heads
+        return self.critic_linear(x), self.actor_linear(x), hx, cx, None, None
+
+
+class A3CRules23478Detach(nn.Module):
+    def __init__(self, num_inputs, action_space, args):
+        super(A3CRules23478Detach, self).__init__()
+        self.hidden_size = args.hidden_size
+        self.monitor_s = getattr(args, 'monitor_s', False)
+        if self.monitor_s:
+            self.s_values = []
+        
+        use_rmsnorm = getattr(args, 'use_rmsnorm', True)
+        self.encoder = EncoderRules234Detach(num_inputs, latent_dim_conv=64, use_rmsnorm=use_rmsnorm)
+
+        num_outputs = action_space.n
+        # Rule 7: relu-fc
+        self.fc = nn.Linear(1024, self.hidden_size)
+        # Rule 8: linear value&actor heads
+        self.critic_linear = nn.Linear(self.hidden_size, 1)
+        self.actor_linear = nn.Linear(self.hidden_size, num_outputs)
+
+        # Custom initialization for fc
+        fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(self.fc.weight)
+        fan = (fan_in + fan_out) / 2
+        gain = nn.init.calculate_gain("relu")
+        std = gain / math.sqrt(fan)
+        bound = math.sqrt(3.0) * std
+        with torch.no_grad():
+            self.fc.weight.uniform_(-bound, bound)
+        self.fc.bias.data.fill_(0)
+
+        # Heads initialization Rule 8: gaussian init with only fan_in
+        for linear in [self.critic_linear, self.actor_linear]:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
+            std = 1.0 / math.sqrt(fan_in)
+            nn.init.normal_(linear.weight, mean=0.0, std=std)
+            linear.bias.data.fill_(0)
+
+        self.actor_linear.weight.data.mul_(0.01)
+        self.critic_linear.weight.data.mul_(1.0)
+
+        self.train()
+
+    def forward(self, inputs, hx, cx, mem=None):
+        x, _, _, _ = self.encoder(inputs)
+
+        s = x.view(x.size(0), -1)
+
+        if self.monitor_s:
+            self.s_values.append(s.detach().cpu())
+
+        hx = torch.Tensor([0])
+        cx = torch.Tensor([0])
+
+        # Rule 7: relu-fc
+        x = F.relu(self.fc(s))
+
+        # Rule 8: linear heads
+        return self.critic_linear(x), self.actor_linear(x), hx, cx, None, None
+
+
+class EncoderRules23456GS(EncoderRules23456):
+    def __init__(self, num_inputs, latent_dim_conv=64, use_rmsnorm=False):
+        super().__init__(num_inputs, latent_dim_conv, use_rmsnorm)
+        # Apply Gram-Schmidt to conv4 weights
+        self.apply_gs_to_conv4()
+
+    def apply_gs_to_conv4(self):
+        W = self.conv4.weight.data
+        out_c, in_c, kH, kW = W.shape
+        W_flat = W.view(out_c, -1)  # (out_c, in_c * kH * kW)
+        Q, R = torch.qr(W_flat.T)
+        W_flat = Q.T
+        self.conv4.weight.data = W_flat.view(out_c, in_c, kH, kW)
+
+    def orthogonalize_conv4(self):
+        W = self.conv4.weight.data
+        out_c, in_c, kH, kW = W.shape
+        W_flat = W.view(out_c, -1)
+        # Normalize each channel to unit norm
+        norms = torch.norm(W_flat, p=2, dim=1, keepdim=True) + 1e-8
+        W_flat = W_flat / norms
+        # Orthogonalize
+        Q, R = torch.qr(W_flat.T)
+        W_flat = Q.T
+        self.conv4.weight.data = W_flat.view(out_c, in_c, kH, kW)
+
+
+class A3CRules2345678(A3CRules23478):
+    def __init__(self, num_inputs, action_space, args):
+        super(A3CRules2345678, self).__init__(num_inputs, action_space, args)
+
+        use_rmsnorm = getattr(args, 'use_rmsnorm', True)
+        self.encoder = EncoderRules23456(num_inputs, latent_dim_conv=64, use_rmsnorm=use_rmsnorm)
+
+class A3CRules2345678LayerNorm(A3CRules23478):
+    def __init__(self, num_inputs, action_space, args):
+        super(A3CRules2345678LayerNorm, self).__init__(num_inputs, action_space, args)
+
+        use_rmsnorm = getattr(args, 'use_rmsnorm', False)  # Force use_rmsnorm to False
+        self.encoder = EncoderRules23456LayerNorm(num_inputs, latent_dim_conv=64, use_rmsnorm=use_rmsnorm)
+
+class A3CRules235678(A3CRules23478):
+    def __init__(self, num_inputs, action_space, args):
+        super(A3CRules235678, self).__init__(num_inputs, action_space, args)
+
+        use_rmsnorm = getattr(args, 'use_rmsnorm', False)
+        self.encoder = EncoderRules23456(num_inputs, latent_dim_conv=64, use_rmsnorm=use_rmsnorm)
+
+class A3CRules235678GS(A3CRules23478):
+    def __init__(self, num_inputs, action_space, args):
+        super(A3CRules235678GS, self).__init__(num_inputs, action_space, args)
+
+        use_rmsnorm = getattr(args, 'use_rmsnorm', False)
+        self.encoder = EncoderRules23456GS(num_inputs, latent_dim_conv=64, use_rmsnorm=use_rmsnorm)
+
+    def orthogonalize_conv4(self):
+        self.encoder.orthogonalize_conv4()
+
+class EncoderRules2378GS(EncoderRules234):
+    def __init__(self, num_inputs, latent_dim_conv=64):
+        super().__init__(num_inputs, latent_dim_conv, use_rmsnorm=False)
+        # Apply Gram-Schmidt to conv4 weights
+        self.apply_gs_to_conv4()
+
+    def apply_gs_to_conv4(self):
+        W = self.conv4.weight.data
+        out_c, in_c, kH, kW = W.shape
+        W_flat = W.view(out_c, -1)  # (out_c, in_c * kH * kW)
+        Q, R = torch.qr(W_flat.T)
+        W_flat = Q.T
+        self.conv4.weight.data = W_flat.view(out_c, in_c, kH, kW)
+
+    def orthogonalize_conv4(self):
+        W = self.conv4.weight.data
+        out_c, in_c, kH, kW = W.shape
+        W_flat = W.view(out_c, -1)
+        # Normalize each channel to unit norm
+        norms = torch.norm(W_flat, p=2, dim=1, keepdim=True) + 1e-8
+        W_flat = W_flat / norms
+        # Orthogonalize
+        Q, R = torch.qr(W_flat.T)
+        W_flat = Q.T
+        self.conv4.weight.data = W_flat.view(out_c, in_c, kH, kW)
+
+    def forward(self, x):
+        # Rule 2: 3 conv-relu-maxpool layers
+        x = F.relu(F.max_pool2d(self.conv1(x), 2, 2))
+        x = F.relu(F.max_pool2d(self.conv2(x), 2, 2))
+        x = F.relu(F.max_pool2d(self.conv3(x), 2, 2))
+        # Rule 3: conv4-relu-maxpool
+        x = F.relu(F.max_pool2d(self.conv4(x), 2, 2))
+
+        # No Rule 4: No normalization (no RMS and no LayerNorm)
+        # No Rule 5: No softmax across conv channels
+        # No Rule 6: No multiplication by coef and sqrt(channel_num)
+
+        return x, None, None, None
+
+class A3CRules2378GS(A3CRules23478):
+    def __init__(self, num_inputs, action_space, args):
+        super(A3CRules2378GS, self).__init__(num_inputs, action_space, args)
+
+        # Force use_rmsnorm to False for 2378GS
+        self.encoder = EncoderRules2378GS(num_inputs, latent_dim_conv=64)
+
+    def orthogonalize_conv4(self):
+        self.encoder.orthogonalize_conv4()
+
+class A3CRules235678GSChangeOrder(A3CRules23478):
+    def __init__(self, num_inputs, action_space, args):
+        super(A3CRules235678GSChangeOrder, self).__init__(num_inputs, action_space, args)
+
+        use_rmsnorm = getattr(args, 'use_rmsnorm', False)
+        self.encoder = EncoderRules23456GSChangeOrder(num_inputs, latent_dim_conv=64, use_rmsnorm=use_rmsnorm)
+
+    def orthogonalize_conv4(self):
+        self.encoder.orthogonalize_conv4()
+
+
+class EncoderRules23456GSChangeOrder(EncoderRules23456GS):
+    def __init__(self, num_inputs, latent_dim_conv=64, use_rmsnorm=False):
+        super().__init__(num_inputs, latent_dim_conv, use_rmsnorm)
+        self.prev_conv4_weight = None
+
+    def orthogonalize_conv4(self):
+        current = self.conv4.weight.data
+        out_c, in_c, kH, kW = current.shape
+
+        if self.prev_conv4_weight is not None:
+            prev = self.prev_conv4_weight
+            changes = torch.norm(current - prev, p=2, dim=(1, 2, 3))
+            order = torch.argsort(changes, descending=True)
+        else:
+            order = torch.arange(out_c)
+
+        W_flat = current.view(out_c, -1)
+        ortho_flat = W_flat.clone()
+
+        for idx in range(len(order)):
+            i = order[idx]
+            v = ortho_flat[i]
+            for j in range(idx):
+                prev_i = order[j]
+                prev_v = ortho_flat[prev_i]
+                proj_coeff = torch.dot(v, prev_v) / (torch.dot(prev_v, prev_v) + 1e-8)
+                v = v - proj_coeff * prev_v
+            ortho_flat[i] = v / (torch.norm(v) + 1e-8)
+
+        self.conv4.weight.data = ortho_flat.view(out_c, in_c, kH, kW)
+
+        # Update previous weights
+        self.prev_conv4_weight = current.clone()
+
+
+class A3CRules2345678GS(A3CRules23478):
+    def __init__(self, num_inputs, action_space, args):
+        super(A3CRules2345678GS, self).__init__(num_inputs, action_space, args)
+
+        use_rmsnorm = getattr(args, 'use_rmsnorm', True)
+        self.encoder = EncoderRules23456GS(num_inputs, latent_dim_conv=64, use_rmsnorm=use_rmsnorm)
+
+    def orthogonalize_conv4(self):
+        self.encoder.orthogonalize_conv4()
+
+
+class A3CRules2345678GSChangeOrder(A3CRules23478):
+    def __init__(self, num_inputs, action_space, args):
+        super(A3CRules2345678GSChangeOrder, self).__init__(num_inputs, action_space, args)
+
+        use_rmsnorm = getattr(args, 'use_rmsnorm', True)
+        self.encoder = EncoderRules23456GSChangeOrder(num_inputs, latent_dim_conv=64, use_rmsnorm=use_rmsnorm)
+
+    def orthogonalize_conv4(self):
+        self.encoder.orthogonalize_conv4()
+
+class A3CRules2378GSChangeOrder(A3CRules23478):
+    def __init__(self, num_inputs, action_space, args):
+        super(A3CRules2378GSChangeOrder, self).__init__(num_inputs, action_space, args)
+
+        # Force use_rmsnorm to False for 2378GS pattern
+        self.encoder = EncoderRules2378GSChangeOrder(num_inputs, latent_dim_conv=64)
+
+    def orthogonalize_conv4(self):
+        self.encoder.orthogonalize_conv4()
+
+class EncoderRules2378GSChangeOrder(EncoderRules2378GS):
+    def __init__(self, num_inputs, latent_dim_conv=64):
+        super().__init__(num_inputs, latent_dim_conv)
+        self.prev_conv4_weight = None
+
+    def orthogonalize_conv4(self):
+        current = self.conv4.weight.data
+        out_c, in_c, kH, kW = current.shape
+
+        if self.prev_conv4_weight is not None:
+            prev = self.prev_conv4_weight
+            changes = torch.norm(current - prev, p=2, dim=(1, 2, 3))
+            order = torch.argsort(changes, descending=True)
+        else:
+            order = torch.arange(out_c)
+
+        W_flat = current.view(out_c, -1)
+        ortho_flat = W_flat.clone()
+
+        for idx in range(len(order)):
+            i = order[idx]
+            v = ortho_flat[i]
+            for j in range(idx):
+                prev_i = order[j]
+                prev_v = ortho_flat[prev_i]
+                proj_coeff = torch.dot(v, prev_v) / (torch.dot(prev_v, prev_v) + 1e-8)
+                v = v - proj_coeff * prev_v
+            ortho_flat[i] = v / (torch.norm(v) + 1e-8)
+
+        self.conv4.weight.data = ortho_flat.view(out_c, in_c, kH, kW)
+
+        # Update previous weights
+        self.prev_conv4_weight = current.clone()
+
+class A3CRules2378Mem(A3CRules2378):
+    """ A3CRules2378 with running memory on internal feature representations concatenated to critic input """
+    def __init__(self, num_inputs, action_space, args):
+        super(A3CRules2378Mem, self).__init__(num_inputs, action_space, args)
+
+        # Override critic_linear to accept memory input
+        self.critic_linear = nn.Linear(self.hidden_size + 1024, 1)  # +1024 for memory
+
+        # Heads initialization for critic with memory
+        fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.critic_linear.weight)
+        std = 1.0 / math.sqrt(fan_in)
+        nn.init.normal_(self.critic_linear.weight, mean=0.0, std=std)
+        self.critic_linear.bias.data.fill_(0)
+        self.critic_linear.weight.data.mul_(1.0)
+
+        # Internal memory for running differences on features
+        self.running_mem = None
+        self.prev_x_conv = None
+        self.gamma = args.gamma
+        self.gamma_memory = args.gamma_memory
+
+    def forward(self, inputs, hx, cx, mem=None):
+        x, _, _, _ = self.encoder(inputs)
+
+        s = x.view(x.size(0), -1)
+
+        if self.monitor_s:
+            self.s_values.append(s.detach().cpu())
+
+        hx = torch.Tensor([0])
+        cx = torch.Tensor([0])
+
+        # Rule 7: relu-fc
+        x_actor = F.relu(self.fc(s))
+
+        is_newbatch = False
+        if self.running_mem is None:
+            self.running_mem = torch.zeros_like(s)
+            is_newbatch = True
+        if self.prev_x_conv is not None:
+            if is_newbatch:  # New batch - detach to break gradient flow between batches
+                diff = (s - self.prev_x_conv).detach()
+                self.running_mem = (diff + self.gamma_memory * self.running_mem).detach()
+            else:  # Within same batch - allow gradients to flow through memory
+                diff = (s - self.prev_x_conv)
+                self.running_mem = (diff + self.gamma_memory * self.running_mem)
+
+        self.prev_x_conv = s
+
+        critic_in = torch.cat([x_actor, self.running_mem], dim=1)
+
+        # Rule 8: linear heads
+        return self.critic_linear(critic_in), self.actor_linear(x_actor), hx, cx, None, None
+
+    def reset_memory(self):
+        """Reset memory state when starting a new episode/batch"""
+        self.running_mem = None
+        self.prev_x_conv = None

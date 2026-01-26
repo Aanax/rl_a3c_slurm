@@ -3,7 +3,7 @@
 #SBATCH -o /s/ls4/users/aamore/rl_a3c_pytorch/logs/%j.out
 #SBATCH -e /s/ls4/users/aamore/rl_a3c_pytorch/logs/%j.err
 #SBATCH -t 72:00:00
-#SBATCH --cpus-per-task=4
+#SBATCH --cpus-per-task=6
 #SBATCH --gres=gpu:2
 #SBATCH -p hpc5-el7-gpu-3d
 
@@ -20,5 +20,4 @@ conda activate pytorch_rl
 echo "ACTIVATED"
 
 param=$1
-python /s/ls4/users/aamore/rl_a3c_pytorch/src/main.py /s/ls4/users/aamore/rl_a3c_pytorch/configs/run_config_our.ini ${param} | tee mytask_logs/mytask.log."$SLURM_JOBID"
-
+python /s/ls4/users/aamore/rl_a3c_pytorch/src/main.py /s/ls4/users/aamore/rl_a3c_pytorch/configs/run_config_our4.ini ${param} | tee mytask_logs/mytask.log."$SLURM_JOBID"

@@ -86,11 +86,14 @@ class Agent(object):
                     self.cx = torch.zeros(1, self.hidden_size)
                     self.hx = torch.zeros(1, self.hidden_size)
                 # Reset model internal memory if applicable
-                if hasattr(self.model, 'running_mem'):
-                    self.model.running_mem = torch.zeros_like(self.model.running_mem)
-                if hasattr(self.model, 'prev_x_conv'):
-                    self.model.prev_x_conv = None
-
+                try:
+                    if hasattr(self.model, 'running_mem'):
+                        self.model.running_mem = torch.zeros_like(self.model.running_mem)
+                    if hasattr(self.model, 'prev_x_conv'):
+                        self.model.prev_x_conv = None
+                except:
+                    pass
+                
             model_output = self.model(
                 self.state.unsqueeze(0), self.hx, self.cx, None
             )

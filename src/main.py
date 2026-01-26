@@ -48,7 +48,7 @@ args.tensorboard_logger = config.getboolean('DEFAULT', 'tensorboard_logger', fal
 args.gif_image_save_frequency = config.getint('DEFAULT', 'gif_image_save_frequency', fallback=100000)
 args.env_config = config.get('DEFAULT', 'env_config', fallback='configs/envs_config.json')
 args.experiment_name = config.get('DEFAULT', 'experiment_name', fallback='unnamed_experiment')
-args.total_steps_stop = config.getint('DEFAULT', 'total_steps_stop', fallback=10000000)
+args.total_steps_stop = config.getint('DEFAULT', 'total_steps_stop', fallback=100000000)
 args.input_normalization_class = config.get('DEFAULT', 'input_normalization_class', fallback='NormalizedEnv')
 args.normalization_alpha = config.getfloat('DEFAULT', 'normalization_alpha', fallback=0.9999)
 args.model_type = config.get('DEFAULT', 'model_type', fallback='A3Clstm')
@@ -57,6 +57,7 @@ args.monitor_s_save_interval = config.getint('DEFAULT', 'monitor_s_save_interval
 args.w_kld_loss = config.getfloat('DEFAULT', 'w_kld_loss', fallback=0.0)
 args.w_restoration_loss = config.getfloat('DEFAULT', 'w_restoration_loss', fallback=0.0)
 args.monitor_losses = config.getboolean('DEFAULT', 'monitor_losses', fallback=False)
+args.save_model_steps = config.getint('DEFAULT', 'save_model_steps', fallback=0)
 
 # For list types
 gpu_ids_str = config.get('DEFAULT', 'gpu_ids', fallback='-1')

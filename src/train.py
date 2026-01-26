@@ -49,6 +49,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
     game_count = 0
     batch_count = 0
     loss_csv_path = None
+    last_save = 0
     if args.monitor_losses:
         log_dir_path = f"{args.log_dir}{args.experiment_name}/"
         os.makedirs(log_dir_path, exist_ok=True)
@@ -102,6 +103,10 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                         print(f"ERROR: Failed to save s monitoring data to: {save_path}")
                     # Clear s values for next games
                 player.model.s_values = []
+
+                # # Reset memory for models with memory when starting new episode
+                # if hasattr(player.model, 'reset_memory'):
+                #     player.model.reset_memory()
 
                 player.eps_len = 0
                 state = player.env.reset()
@@ -164,6 +169,19 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             total_loss.backward()
             ensure_shared_grads(player.model, shared_model, gpu=gpu_id >= 0)
             optimizer.step()
+
+            # Reset memory for models with memory when starting new batch
+            if hasattr(player.model, 'reset_memory'):
+                player.model.reset_memory()
+
+            if hasattr(shared_model, 'orthogonalize_conv4'):
+                shared_model.orthogonalize_conv4()
+
+            if args.save_model_steps > 0 and frames_total.value // args.save_model_steps > last_save and rank == 0:
+                last_save = frames_total.value // args.save_model_steps
+                log_dir_path = f"{args.log_dir}{args.experiment_name}/"
+                os.makedirs(log_dir_path, exist_ok=True)
+                torch.save(shared_model.state_dict(), f"{log_dir_path}model_{frames_total.value}.dat")
 
             # Save losses to CSV if monitoring is enabled
             if args.monitor_losses:

@@ -313,3 +313,114 @@ def draw_meanIntep_and_runs(mean, runs, new_x, n_tests = 500, col = "red", alpha
     plt.xlabel('frames_total', fontsize=22)
     plt.ylabel('mean_reward_10', fontsize=22)
     return ax
+
+def draw_meanIntep_with_colored_runs(mean, runs, new_x, n_tests=None, 
+                                     colormap='rainbow', alpha=0.7, 
+                                     ax=None, label="mean", linestyle='solid',
+                                     linewidth_mean=3, linewidth_runs=2,
+                                     randomize_colors=False, seed=None):
+    """
+    Draw interpolated mean and individual runs with unique colors.
+    
+    Parameters:
+    -----------
+    mean : array-like
+        Mean values to plot
+    runs : list of array-like
+        List of individual runs
+    new_x : array-like
+        X values (typically frames_total)
+    n_tests : int or None
+        Number of points to plot (if None, plot all)
+    colormap : str or matplotlib colormap
+        Colormap to use for individual runs
+        Options: 'rainbow', 'viridis', 'plasma', 'tab10', 'Set3', etc.
+    alpha : float
+        Transparency for individual runs
+    ax : matplotlib axis or None
+        Axis to plot on
+    label : str
+        Label for the mean line
+    linestyle : str
+        Line style for mean and runs
+    linewidth_mean : float
+        Line width for mean
+    linewidth_runs : float
+        Line width for individual runs
+    randomize_colors : bool
+        If True, randomize color order
+    seed : int or None
+        Random seed for reproducibility
+    
+    Returns:
+    --------
+    matplotlib axis
+    """
+    
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from matplotlib.cm import get_cmap
+    
+    # Limit number of points if specified
+    if n_tests is not None:
+        indices = np.linspace(0, len(new_x)-1, min(n_tests, len(new_x)), dtype=int)
+        new_x_plot = new_x[indices]
+        mean_plot = mean[indices]
+        runs_plot = [run[indices] for run in runs]
+    else:
+        new_x_plot = new_x
+        mean_plot = mean
+        runs_plot = runs
+    
+    # Create figure if no axis provided
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(15, 8))
+    
+    # Get colormap
+    if isinstance(colormap, str):
+        cmap = get_cmap(colormap)
+    else:
+        cmap = colormap
+    
+    # Generate colors for each run
+    n_runs = len(runs_plot)
+    
+    if colormap in ['tab10', 'tab20', 'Set1', 'Set2', 'Set3']:
+        # For discrete colormaps
+        colors = [cmap(i % cmap.N) for i in range(n_runs)]
+    else:
+        # For continuous colormaps
+        color_indices = np.linspace(0, 1, n_runs)
+        if randomize_colors and seed is not None:
+            np.random.seed(seed)
+            np.random.shuffle(color_indices)
+        elif randomize_colors:
+            np.random.shuffle(color_indices)
+        colors = [cmap(idx) for idx in color_indices]
+    
+    # Plot individual runs with unique colors
+    for i, (run, color) in enumerate(zip(runs_plot, colors)):
+        ax.plot(new_x_plot, run, 
+                lw=linewidth_runs, 
+                alpha=alpha, 
+                color=color, 
+                label=f'Run {i+1}' if n_runs <= 10 else '_nolegend_',
+                linestyle=linestyle)
+    
+    # Plot mean with bold black line
+    ax.plot(new_x_plot, mean_plot, 
+            lw=linewidth_mean, 
+            color='black', 
+            label=label,
+            linestyle=linestyle)
+    
+    # Add legend if we have few runs
+    if n_runs <= 10:
+        ax.legend(fontsize=12, loc='best')
+    
+    # Labels
+    ax.set_xlabel('frames_total', fontsize=14)
+    ax.set_ylabel('mean_reward_10', fontsize=14)
+    ax.grid(True, alpha=0.3)
+    
+    return ax

@@ -113,7 +113,7 @@ class NormalizedEnvGameNormNoNormDiffOnNorm(gym.ObservationWrapper):
         super().__init__(env)
         self.state_mean = 0
         self.state_std = 0
-        self.alpha = getattr(args, 'normalization_alpha', 0.9999)
+        self.alpha = getattr(args, 'normalization_alpha', 0.999)
         self.num_steps = 0
         self.previous_observation = np.zeros([1, 80, 80]).astype(np.float32)
         self.observation_space = Box(0.0, 1.0, [2, 80, 80], dtype=np.uint8)
