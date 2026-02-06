@@ -2232,6 +2232,51 @@ class A3CRules2378(nn.Module):
 # III. GS normalization of conv4-layer weights (including weight change ranging) is optional (to do in experiments after main programm).
 
 
+class A3CRules2378_nofc(nn.Module):
+    """Same as A3CRules2378 but without fc after conv layers - heads connect directly to encoder output."""
+    def __init__(self, num_inputs, action_space, args):
+        super(A3CRules2378_nofc, self).__init__()
+        self.monitor_s = getattr(args, 'monitor_s', False)
+        if self.monitor_s:
+            self.s_values = []
+        
+        use_rmsnorm = getattr(args, 'use_rmsnorm', False)
+        self.encoder = EncoderRules234(num_inputs, latent_dim_conv=64, use_rmsnorm=use_rmsnorm)
+
+        num_outputs = action_space.n
+        # No fc layer - connect directly to heads from encoder output (1024)
+        # Rule 8: linear value&actor heads
+        self.critic_linear = nn.Linear(1024, 1)
+        self.actor_linear = nn.Linear(1024, num_outputs)
+
+        # Heads initialization Rule 8: gaussian init with only fan_in
+        for linear in [self.critic_linear, self.actor_linear]:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
+            std = 1.0 / math.sqrt(fan_in)
+            nn.init.normal_(linear.weight, mean=0.0, std=std)
+            linear.bias.data.fill_(0)
+
+        self.actor_linear.weight.data.mul_(0.01)
+        self.critic_linear.weight.data.mul_(1.0)
+
+        self.train()
+
+    def forward(self, inputs, hx, cx, mem=None):
+        x, _, _, _ = self.encoder(inputs)
+
+        s = x.view(x.size(0), -1)
+
+        if self.monitor_s:
+            self.s_values.append(s.detach().cpu())
+
+        hx = torch.Tensor([0])
+        cx = torch.Tensor([0])
+
+        # No fc layer - directly to heads
+        # Rule 8: linear heads
+        return self.critic_linear(s), self.actor_linear(s), hx, cx, None, None
+
+
 class EncoderRules23456(EncoderRules234):
     def forward(self, x):
         # Rule 2: 3 conv-relu-maxpool layers
@@ -2682,3 +2727,106 @@ class A3CRules2378Mem(A3CRules2378):
         """Reset memory state when starting a new episode/batch"""
         self.running_mem = None
         self.prev_x_conv = None
+
+
+class A3CRules2378MemDetach(A3CRules2378Mem):
+    """ A3CRules2378Mem but with memory detached every time (no gradients flow through memory) """
+    def __init__(self, num_inputs, action_space, args):
+        super(A3CRules2378MemDetach, self).__init__(num_inputs, action_space, args)
+
+    def forward(self, inputs, hx, cx, mem=None):
+        x, _, _, _ = self.encoder(inputs)
+
+        s = x.view(x.size(0), -1)
+
+        if self.monitor_s:
+            self.s_values.append(s.detach().cpu())
+
+        hx = torch.Tensor([0])
+        cx = torch.Tensor([0])
+
+        # Rule 7: relu-fc
+        x_actor = F.relu(self.fc(s))
+
+        if self.running_mem is None:
+            self.running_mem = torch.zeros_like(s)
+        if self.prev_x_conv is not None:
+            # Always detach - no gradients flow through memory
+            diff = (s - self.prev_x_conv).detach()
+            self.running_mem = (diff + self.gamma_memory * self.running_mem).detach()
+
+        self.prev_x_conv = s.detach()
+
+        critic_in = torch.cat([x_actor, self.running_mem], dim=1)
+
+        # Rule 8: linear heads
+        return self.critic_linear(critic_in), self.actor_linear(x_actor), hx, cx, None, None
+
+class A3CRules2378MemDetach_nofc(A3CRules2378_nofc):
+    """ A3CRules2378Mem but with memory detached every time (no gradients flow through memory) """
+    def __init__(self, num_inputs, action_space, args):
+        super(A3CRules2378MemDetach_nofc, self).__init__(num_inputs, action_space, args)
+
+
+        self.num_inputs = num_inputs
+        self.hidden_size = args.hidden_size
+
+        self.monitor_s = getattr(args, 'monitor_s', False)
+        if self.monitor_s:
+            self.s_values = []
+
+        num_outputs = action_space.n
+        self.actor_linear = nn.Linear(self.hidden_size, num_outputs)
+
+        self.actor_linear.weight.data = norm_col_init(
+            self.actor_linear.weight.data, 0.01
+        )
+        self.actor_linear.bias.data.fill_(0)
+
+        # Override critic_linear to accept memory input
+        self.critic_linear = nn.Linear(self.hidden_size + 1024, 1)  # +1024 for memory
+
+        # Heads initialization for critic with memory
+        fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.critic_linear.weight)
+        std = 1.0 / math.sqrt(fan_in)
+        nn.init.normal_(self.critic_linear.weight, mean=0.0, std=std)
+        self.critic_linear.bias.data.fill_(0)
+        self.critic_linear.weight.data.mul_(1.0)
+
+        # Internal memory for running differences on features
+        self.gamma = args.gamma
+        self.gamma_memory = args.gamma_memory
+
+        # Internal memory for running differences on features
+        self.running_mem = torch.zeros((1,1024))
+        self.prev_x_conv = torch.zeros((1,1024))
+
+        self.train()
+
+    def forward(self, inputs, hx, cx, mem=None):
+        x, _, _, _ = self.encoder(inputs)
+
+        s = x.view(x.size(0), -1)
+
+        if self.monitor_s:
+            self.s_values.append(s.detach().cpu())
+
+        hx = torch.Tensor([0])
+        cx = torch.Tensor([0])
+
+        # Rule 7: relu-fc
+        x_actor = s #F.relu(self.fc(s))
+
+        if self.running_mem is None:
+            self.running_mem = torch.zeros_like(s)
+        if self.prev_x_conv is not None:
+            # Always detach - no gradients flow through memory
+            diff = (s - self.prev_x_conv).detach()
+            self.running_mem = (diff + self.gamma_memory * self.running_mem).detach()
+
+        self.prev_x_conv = s.detach()
+
+        critic_in = torch.cat([x_actor, self.running_mem], dim=1)
+
+        # Rule 8: linear heads
+        return self.critic_linear(critic_in), self.actor_linear(x_actor), hx, cx, None, None
