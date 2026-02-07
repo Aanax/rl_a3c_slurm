@@ -142,6 +142,51 @@ class A3CRules2378(nn.Module):
         # Rule 8: linear heads
         return self.critic_linear(x), self.actor_linear(x), hx, cx, None, None
 
+
+class A3CRules2378_nofc(nn.Module):
+    """Same as A3CRules2378 but without fc after conv layers - heads connect directly to encoder output."""
+    def __init__(self, num_inputs, action_space, args):
+        super(A3CRules2378_nofc, self).__init__()
+        self.monitor_s = getattr(args, 'monitor_s', False)
+        if self.monitor_s:
+            self.s_values = []
+        
+        use_rmsnorm = getattr(args, 'use_rmsnorm', False)
+        self.encoder = EncoderRules234(num_inputs, latent_dim_conv=64, use_rmsnorm=use_rmsnorm)
+
+        num_outputs = action_space.n
+        # No fc layer - connect directly to heads from encoder output (1024)
+        # Rule 8: linear value&actor heads
+        self.critic_linear = nn.Linear(1024, 1)
+        self.actor_linear = nn.Linear(1024, num_outputs)
+
+        # Heads initialization Rule 8: gaussian init with only fan_in
+        for linear in [self.critic_linear, self.actor_linear]:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
+            std = 1.0 / math.sqrt(fan_in)
+            nn.init.normal_(linear.weight, mean=0.0, std=std)
+            linear.bias.data.fill_(0)
+
+        self.actor_linear.weight.data.mul_(0.01)
+        self.critic_linear.weight.data.mul_(1.0)
+
+        self.train()
+
+    def forward(self, inputs, hx, cx, mem=None):
+        x, _, _, _ = self.encoder(inputs)
+
+        s = x.view(x.size(0), -1)
+
+        if self.monitor_s:
+            self.s_values.append(s.detach().cpu())
+
+        hx = torch.Tensor([0])
+        cx = torch.Tensor([0])
+
+        # No fc layer - directly to heads
+        # Rule 8: linear heads
+        return self.critic_linear(s), self.actor_linear(s), hx, cx, None, None
+
     
 
 class EncoderRules234_2(nn.Module):
