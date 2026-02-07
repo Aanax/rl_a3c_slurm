@@ -27,3 +27,8 @@ https://github.com/pytorch/pytorch/blob/8625ffbd45884464f736cfc61300c14f47633641
 
 U(-bound,bound)
 где bound = sqrt(2) * sqrt(3/fan_in)
+
+
+----------
+ветка 2level_try1
+пробую сделать 2 уровня из 2378 noRMS batch 32
