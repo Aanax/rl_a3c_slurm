@@ -16,9 +16,12 @@ class Agent(object):
         self.eps_len = 0
         self.args = args
         self.values = []
+        self.values2 = []  # V2 values for hierarchical models
         self.log_probs = []
+        self.log_probs2 = []  # Actor2 log probs for hierarchical models
         self.rewards = []
         self.entropies = []
+        self.entropies2 = []  # Actor2 entropies for hierarchical models
         self.x_restoreds = []
         self.kls = []
         self.states = []
@@ -38,17 +41,42 @@ class Agent(object):
             value, logit, self.hx, self.cx = model_output
             x_restored = None
             kl = None
+            value2 = None
+            logit2 = None
         elif len(model_output) == 5:
             value, logit, self.hx, self.cx, x_restored = model_output
             kl = None
+            value2 = None
+            logit2 = None
         elif len(model_output) == 6:
             value, logit, self.hx, self.cx, x_restored, kl = model_output
+            value2 = None
+            logit2 = None
+        elif len(model_output) == 8:
+            # Hierarchical model: V1, a1, hx, cx, None, None, V2, a2
+            value, logit, self.hx, self.cx, _, _, value2, logit2 = model_output
+            x_restored = None
+            kl = None
+        else:
+            raise ValueError(f"Unexpected model output length: {len(model_output)}. Expected 4, 5, 6, or 8.")
+        
         prob = F.softmax(logit, dim=1)
         log_prob = F.log_softmax(logit, dim=1)
         entropy = -(log_prob * prob).sum(1)
         self.entropies.append(entropy)
         action = prob.multinomial(1).data
         log_prob = log_prob.gather(1, action)
+        
+        # Handle actor2 if hierarchical model
+        if logit2 is not None:
+            prob2 = F.softmax(logit2, dim=1)
+            log_prob2 = F.log_softmax(logit2, dim=1)
+            entropy2 = -(log_prob2 * prob2).sum(1)
+            self.entropies2.append(entropy2)
+            action2 = prob2.multinomial(1).data
+            log_prob2 = log_prob2.gather(1, action2)
+            self.log_probs2.append(log_prob2)
+            self.values2.append(value2)
         state, self.reward, self.done, self.info = self.env.step(
             action.item())
         if self.gpu_id >= 0:
@@ -98,6 +126,8 @@ class Agent(object):
                 self.state.unsqueeze(0), self.hx, self.cx, None
             )
             if len(model_output) >= 4:
+                # For hierarchical models (8 elements), use first 4: V1, a1, hx, cx
+                # For non-hierarchical models (4-6 elements), use all available
                 value, logit, self.hx, self.cx = model_output[:4]
             prob = F.softmax(logit, dim=1)
             action = prob.cpu().numpy().argmax()
@@ -113,9 +143,12 @@ class Agent(object):
 
     def clear_actions(self):
         self.values = []
+        self.values2 = []
         self.log_probs = []
+        self.log_probs2 = []
         self.rewards = []
         self.entropies = []
+        self.entropies2 = []
         self.x_restoreds = []
         self.kls = []
         self.states = []

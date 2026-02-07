@@ -120,9 +120,14 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 with torch.cuda.device(gpu_id):
                     R = torch.zeros(1, 1).cuda()
                     gae = torch.zeros(1, 1).cuda()
+                    R2 = torch.zeros(1, 1).cuda()
+                    gae2 = torch.zeros(1, 1).cuda()
             else:
                 R = torch.zeros(1, 1)
                 gae = torch.zeros(1, 1)
+                R2 = torch.zeros(1, 1)
+                gae2 = torch.zeros(1, 1)
+            model_output = None
             if not player.done:
                 state = player.state
                 model_output = player.model(
@@ -130,9 +135,22 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 )
                 value = model_output[0]
                 R = value.detach()
+                # For hierarchical models, also get V2
+                if len(model_output) >= 8:
+                    value2 = model_output[6]
+                    R2 = value2.detach()
             player.values.append(R)
+            # Check if model is hierarchical (has V2 and a2 outputs)
+            # If values2 was populated during action_train, model is hierarchical
+            is_hierarchical = len(player.values2) > 0
+            if is_hierarchical:
+                # Append final R2 to match the final R we just appended
+                # If episode is done, R2 remains zeros (bootstrap value)
+                player.values2.append(R2)
             policy_loss = 0
             value_loss = 0
+            policy_loss2 = 0
+            value_loss2 = 0
             for i in reversed(range(len(player.rewards))):
                 R = args.gamma * R + player.rewards[i]
                 advantage = R - player.values[i]
@@ -151,6 +169,28 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     - (player.log_probs[i] * gae)
                     - (args.entropy_coef * player.entropies[i])
                 )
+                
+                # Level 2 losses for hierarchical models
+                if is_hierarchical and len(player.values2) > i and len(player.log_probs2) > i:
+                    # r2_i = V1_i (reward for critic2 is the prediction of V1 on each step)
+                    r2_i = player.values[i].detach()
+                    R2 = args.gamma2 * R2 + r2_i
+                    advantage2 = R2 - player.values2[i]
+                    value_loss2 = value_loss2 + 0.5 * advantage2.pow(2)
+                    
+                    # Generalized Advantage Estimation for level 2
+                    delta_t2 = (
+                        r2_i
+                        + args.gamma2 * player.values2[i + 1].data
+                        - player.values2[i].data
+                    )
+                    
+                    gae2 = gae2 * args.gamma2 * args.tau + delta_t2
+                    policy_loss2 = (
+                        policy_loss2
+                        - (player.log_probs2[i] * gae2)
+                        - (args.entropy_coef * player.entropies2[i])
+                    )
 
             # Additional losses for VAE models (only compute if weights > 0)
             kld_loss = 0
@@ -163,7 +203,15 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     if args.w_restoration_loss > 0 and len(player.x_restoreds) > i:
                         restoration_loss += args.w_restoration_loss * (player.x_restoreds[i] - player.states[i].detach()).pow(2).mean()
 
-            total_loss = policy_loss + 0.5 * value_loss + kld_loss + restoration_loss
+            # Combine critic1 loss with critic2 loss
+            if is_hierarchical:
+                value_loss = value_loss + value_loss2
+            
+            # Total loss: actor1 + actor2 + combined critic loss
+            if is_hierarchical:
+                total_loss = policy_loss + policy_loss2 + 0.5 * value_loss + kld_loss + restoration_loss
+            else:
+                total_loss = policy_loss + 0.5 * value_loss + kld_loss + restoration_loss
 
             player.model.zero_grad()
             total_loss.backward()
