@@ -235,14 +235,14 @@ class Hierarchial(nn.Module):
         use_rmsnorm = getattr(args, 'use_rmsnorm', False)
         self.level1_encoder = EncoderRules234(num_inputs, latent_dim_conv=64, use_rmsnorm=use_rmsnorm)
         
-        # Level 2 encoder (operates on 64*4*4 input)
+        # Level 2 encoder (64*4*4 input)
         self.level2_encoder = EncoderRules234_2()
 
         # Level 2 heads (32*4*4 = 512 input)
         self.critic_linear2 = nn.Linear(32*4*4, 1)
         self.actor_linear2 = nn.Linear(32*4*4, 16)
 
-        # Level 1 heads (64*4*4 = 1024 input, concatenated with a2)
+        # Level 1 heads (64*4*4 = 1024 input, concat with a2)
         self.critic_linear = nn.Linear(64*4*4, 1)
         self.actor_linear = nn.Linear(64*4*4 + 16, num_outputs)
 
@@ -279,17 +279,23 @@ class Hierarchial(nn.Module):
         s2 = F.relu(s)
         s2, _, _, _ = self.level2_encoder(s2)  # s2: 32*4*4
         s2_flat = s2.view(s2.size(0), -1)
-        a2 = self.actor_linear2(s2_flat)
+        a2_logits = self.actor_linear2(s2_flat)
         V2 = self.critic_linear2(s2_flat)
+
+        # Sample from a2 probabilities to get one-hot binary vector
+        a2_probs = F.softmax(a2_logits, dim=1)
+        a2_sample = a2_probs.multinomial(1)  # Sample
+        a2_onehot = torch.zeros_like(a2_probs)
+        a2_onehot.scatter_(1, a2_sample, 1.0)  # Create binary
 
         # Level 1 processing
         s_flat = s.view(s.size(0), -1)
         s_flat = F.relu(s_flat)
-        actor_input = torch.cat([s_flat, a2], dim=1)
+        actor_input = torch.cat([s_flat, a2_onehot], dim=1)
         a1 = self.actor_linear(actor_input)
         V1 = self.critic_linear(s_flat)
 
-        return V1, a1, hx, cx, None, None, V2, a2
+        return V1, a1, hx, cx, None, None, V2, a2_logits
 
 
 

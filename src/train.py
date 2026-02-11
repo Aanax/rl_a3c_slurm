@@ -163,14 +163,8 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     - player.values[i].data
                 )
 
-                gae = gae * args.gamma * args.tau + delta_t
-                policy_loss = (
-                    policy_loss
-                    - (player.log_probs[i] * gae)
-                    - (args.entropy_coef * player.entropies[i])
-                )
-                
                 # Level 2 losses for hierarchical models
+                delta_t2 = None
                 if is_hierarchical and len(player.values2) > i and len(player.log_probs2) > i:
                     # r2_i = V1_i (reward for critic2 is the prediction of V1 on each step)
                     r2_i = player.values[i].detach()
@@ -186,6 +180,21 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     )
                     
                     gae2 = gae2 * args.gamma2 * args.tau + delta_t2
+
+                # For actor1, use sum of delta_t and delta_t2 (if hierarchical)
+                if delta_t2 is not None:
+                    gae = gae * args.gamma * args.tau + (delta_t + delta_t2)
+                else:
+                    gae = gae * args.gamma * args.tau + delta_t
+                    
+                policy_loss = (
+                    policy_loss
+                    - (player.log_probs[i] * gae)
+                    - (args.entropy_coef * player.entropies[i])
+                )
+                
+                # Actor2 loss (only for hierarchical models)
+                if is_hierarchical and len(player.log_probs2) > i:
                     policy_loss2 = (
                         policy_loss2
                         - (player.log_probs2[i] * gae2)
