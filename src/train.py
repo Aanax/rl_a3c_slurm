@@ -173,7 +173,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 # Level 2 losses for hierarchical models
                 if is_hierarchical and len(player.values2) > i and len(player.log_probs2) > i:
                     # r2_i = V1_i (reward for critic2 is the prediction of V1 on each step)
-                    r2_i = player.values[i].detach()
+                    r2_i = player.values[i].detach()*(1-args.gamma)
                     R2 = args.gamma2 * R2 + r2_i
                     advantage2 = R2 - player.values2[i]
                     value_loss2 = value_loss2 + 0.5 * advantage2.pow(2)
