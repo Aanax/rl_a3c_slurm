@@ -59,6 +59,7 @@ args.w_kld_loss = config.getfloat('DEFAULT', 'w_kld_loss', fallback=0.0)
 args.w_restoration_loss = config.getfloat('DEFAULT', 'w_restoration_loss', fallback=0.0)
 args.monitor_losses = config.getboolean('DEFAULT', 'monitor_losses', fallback=False)
 args.save_model_steps = config.getint('DEFAULT', 'save_model_steps', fallback=0)
+args.train_version = config.get('DEFAULT', 'train_version', fallback='v1')
 
 # For list types
 gpu_ids_str = config.get('DEFAULT', 'gpu_ids', fallback='-1')

@@ -14,6 +14,61 @@ import pickle
 import csv
 import os
 
+
+def compute_level2_loss_v1(args, player, i, gae2, R2):
+    """
+    v1: orig algo for level 2 loss.
+    
+    r2_i = V1_i * (1 - gamma1)
+    R2 = gamma2 * R2 + r2_i
+    advantage2 = R2 - V2[i]
+    """
+    # r2_i = V1_i (r for critic2 is V1)
+    r2_i = player.values[i].detach() * (1 - args.gamma)
+    R2 = args.gamma2 * R2 + r2_i
+    advantage2 = R2 - player.values2[i]
+    value_loss2_i = 0.5 * advantage2.pow(2)
+    
+    # Generalized Advantage Estimation for level 2
+    delta_t2 = (
+        r2_i
+        + args.gamma2 * player.values2[i + 1].data
+        - player.values2[i].data
+    )
+    
+    gae2 = gae2 * args.gamma2 * args.tau + delta_t2
+    
+    return advantage2, value_loss2_i, delta_t2, gae2, R2
+
+
+def compute_level2_loss_v2(args, player, i, r2, V2Target, gae2):
+    """
+    v2: new algo for level 2 loss.
+    
+    r2 := g1 * r2 + (1 - g1) * r[i]
+    V2Target := V2Target * g2 + r2
+    advantage2 := V2Target.detach - V2[i]
+    """
+    # r2 = g1 * r2 + (1 - g1) * r[i]
+    r2 = args.gamma * r2 + (1 - args.gamma) * player.rewards[i]
+    # V2Target := V2Target * g2 + r2
+    V2Target = V2Target * args.gamma2 + r2
+    # a2 = V2Target.detach - V2[i]
+    advantage2 = V2Target.detach() - player.values2[i]
+    value_loss2_i = 0.5 * advantage2.pow(2)
+    
+    # Use V1(1-g1) for r2_i and GAE for level 2
+    r2_i = player.values[i].detach() * (1 - args.gamma)
+    delta_t2 = (
+        r2_i
+        + args.gamma2 * player.values2[i + 1].data
+        - player.values2[i].data
+    )
+    gae2 = gae2 * args.gamma2 * args.tau + delta_t2
+    
+    return advantage2, value_loss2_i, delta_t2, gae2, r2, V2Target
+
+
 def train(rank, args, shared_model, optimizer, env_conf, frames_total):
     ptitle(f"Train Agent: {rank}")
     gpu_id = args.gpu_ids[rank % len(args.gpu_ids)]
@@ -151,35 +206,56 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             value_loss = 0
             policy_loss2 = 0
             value_loss2 = 0
+            
+            # Determine which train version to use for level 2 calculations
+            train_version = getattr(args, 'train_version', 'v1')
+            use_train_v2 = (train_version == 'v2')
+            
+            # trainv2: init r2 and V2Target at the start of the batch
+            if is_hierarchical and use_train_v2:
+                # r2 = (1-g1)*V1[H].detach() - w last value (botstrap)
+                r2 = (1 - args.gamma) * player.values[-1].detach()
+                # V2Target = V2[H].detach() - use the last value2 (bootstrap)
+                V2Target = player.values2[-1].detach()
+            
             for i in reversed(range(len(player.rewards))):
                 R = args.gamma * R + player.rewards[i]
                 advantage = R - player.values[i]
                 value_loss = value_loss + 0.5 * advantage.pow(2)
 
-                # Generalized Advantage Estimataion
+                # Generalized Advantage Estimataion 1
                 delta_t = (
                     player.rewards[i]
                     + args.gamma * player.values[i + 1].data
                     - player.values[i].data
                 )
 
-                # Level 2 losses for hierarchical models
+                # Level 2 loss
                 delta_t2 = None
                 if is_hierarchical and len(player.values2) > i and len(player.log_probs2) > i:
-                    # r2_i = V1_i (reward for critic2 is the prediction of V1 on each step)
-                    r2_i = player.values[i].detach()*(1-args.gamma)
-                    R2 = args.gamma2 * R2 + r2_i
-                    advantage2 = R2 - player.values2[i]
-                    value_loss2 = value_loss2 + 0.5 * advantage2.pow(2)
-                    
-                    # Generalized Advantage Estimation for level 2
-                    delta_t2 = (
-                        r2_i
-                        + args.gamma2 * player.values2[i + 1].data
-                        - player.values2[i].data
-                    )
-                    
-                    gae2 = gae2 * args.gamma2 * args.tau + delta_t2
+                    if use_train_v2:
+                        (
+                            advantage2,
+                            value_loss2_i,
+                            delta_t2,
+                            gae2,
+                            r2,
+                            V2Target
+                        ) = compute_level2_loss_v2(
+                            args, player, i, r2, V2Target, gae2
+                        )
+                        value_loss2 = value_loss2 + value_loss2_i
+                    else:
+                        (
+                            advantage2,
+                            value_loss2_i,
+                            delta_t2,
+                            gae2,
+                            R2
+                        ) = compute_level2_loss_v1(
+                            args, player, i, gae2, R2
+                        )
+                        value_loss2 = value_loss2 + value_loss2_i
 
                 # For actor1, use sum of delta_t and delta_t2 (if hierarchical)
                 if delta_t2 is not None:
@@ -193,7 +269,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     - (args.entropy_coef * player.entropies[i])
                 )
                 
-                # Actor2 loss (only for hierarchical models)
+                # Actor2 loss (only for hierarchical)
                 if is_hierarchical and len(player.log_probs2) > i:
                     policy_loss2 = (
                         policy_loss2
