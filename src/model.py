@@ -330,7 +330,7 @@ class Hierarchial(nn.Module):
 
 class Hierarchial_memory(nn.Module):
     def __init__(self, num_inputs, action_space, args):
-        super(Hierarchical_memory, self).__init__()
+        super(Hierarchial_memory, self).__init__()
         self.hidden_size = args.hidden_size
         self.gamma1 = args.gamma
         self.monitor_s = getattr(args, 'monitor_s', False)
