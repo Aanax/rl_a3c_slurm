@@ -307,7 +307,7 @@ class Hierarchial(nn.Module):
         cx = torch.Tensor([0])
 
         # Level 2 processing
-        s2 = F.relu(s)
+        s2 = s #F.relu(s)
         s2, _, _, _ = self.level2_encoder(s2)  # s2: 32*4*4
         s2_flat = s2.view(s2.size(0), -1)
         a2_logits = self.actor_linear2(s2_flat)
@@ -401,10 +401,10 @@ class Hierarchial_memory(nn.Module):
 
         # Level 2
         # Level 2 processing with memory
-        s2 = F.relu(s)
+        s2 = s#F.relu(s)
         # Concat s2 with relu(running memory) along channel dimension
-        mem_relu = F.relu(self.running_mem)
-        s2_input = torch.cat([s2, mem_relu], dim=1) # 64 + 64 at input
+        #F.relu(self.running_mem)
+        s2_input = torch.cat([s2, self.running_mem], dim=1) # 64 + 64 at input
         s2, _, _, _ = self.level2_encoder(s2_input)  # s2: (32+32)*4*4 = 64*4*4
         s2_flat = s2.view(s2.size(0), -1)
         a2_logits = self.actor_linear2(s2_flat)
