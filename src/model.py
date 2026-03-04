@@ -223,7 +223,7 @@ class EncoderRules234_2(nn.Module):
 class EncoderRules234_2_mem(nn.Module):
     """Encoder following Rules 2, 3, 4 - used by A3CRules2378"""
     def __init__(self):
-        super(EncoderRules234_2, self).__init__()
+        super(EncoderRules234_2_mem, self).__init__()
         self.conv1 = nn.Conv2d(64+64, 32+32, 3, stride=1, padding=1)
         self.reset_parameters()
 
