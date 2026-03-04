@@ -221,14 +221,15 @@ class EncoderRules234_2(nn.Module):
         return x, None, None, None
 
 class EncoderRules234_2_mem(nn.Module):
-    """Encoder following Rules 2, 3, 4 - used by A3CRules2378"""
+    """Encoder following Rules 2, 3, 4 - used by A3CRules2378 with more aggressive channel compression"""
     def __init__(self):
         super(EncoderRules234_2_mem, self).__init__()
+        # More aggressive channel compression: 128 -> 16 channels
         self.conv1 = nn.Conv2d(64+64, 32+32, 3, stride=1, padding=1)
         self.reset_parameters()
 
     def reset_parameters(self):
-        convs = [self.conv1]#, self.conv2, self.conv3, self.conv4]
+        convs = [self.conv1]
         gain = nn.init.calculate_gain('relu')
         for conv in convs:
             if conv.bias is not None:
@@ -347,8 +348,8 @@ class Hierarchial_memory(nn.Module):
         self.level2_encoder = EncoderRules234_2_mem()
 
         # Level 2 heads (32*4*4 = 512 input)
-        self.critic_linear2 = nn.Linear(32*4*4, 1)
-        self.actor_linear2 = nn.Linear(32*4*4, 16)
+        self.critic_linear2 = nn.Linear((32+32)*4*4, 1)
+        self.actor_linear2 = nn.Linear((32+32)*4*4, 16)
 
         # Level 1 heads (64*4*4 = 1024 input + 1024 memory)
         self.critic_linear = nn.Linear(1024 + 1024, 1)
