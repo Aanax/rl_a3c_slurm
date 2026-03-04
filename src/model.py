@@ -328,7 +328,7 @@ class Hierarchial(nn.Module):
         return V1, a1, hx, cx, None, None, V2, a2_logits
 
 
-class Hierarchical_memory(nn.Module):
+class Hierarchial_memory(nn.Module):
     def __init__(self, num_inputs, action_space, args):
         super(Hierarchical_memory, self).__init__()
         self.hidden_size = args.hidden_size
