@@ -6,6 +6,7 @@
 #SBATCH -t 02:00:00
 #SBATCH --nodes 1
 #SBATCH --cpus-per-task=2
+#SBATCH --gres=gpu:1
 #SBATCH -p hpc4-el7-gpu-3d
 
 # Usage:
