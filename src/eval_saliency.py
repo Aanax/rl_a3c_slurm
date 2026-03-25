@@ -178,18 +178,18 @@ def collect_rollout(net, env, num_frames):
     """
     Greedy policy rollout for num_frames steps.
 
-    Returns four parallel lists:
-        frames_rgb  — (H_raw, W_raw, 3) uint8 raw Atari frames
-        obs_list    — (2, 80, 80) float32 processed observations
-        logits_list — (num_actions,) float32 actor logits
-        action_list — int chosen action indices
+    Returns five parallel lists:
+        frames_rgb   — (H_raw, W_raw, 3) uint8 raw Atari frames
+        obs_list     — (2, 80, 80) float32 processed observations
+        logits_list  — (num_actions,) float32 actor logits
+        action_list  — int chosen action indices
+        memory_list  — tuples of (running_mem, prev_x_conv) after each step
 
-    Model memory (running_mem, prev_x_conv) is reset at episode boundaries
-    so the model's temporal context matches what it would have during training.
-    Raw RGB is captured before env.step() so the frame corresponds to the
-    observation that caused the logged action.
+    Model memory is reset at episode boundaries. After each forward pass,
+    we snapshot memory so that saliency scans for each frame use the correct
+    temporal state (not the end-of-rollout state).
     """
-    frames_rgb, obs_list, logits_list, action_list = [], [], [], []
+    frames_rgb, obs_list, logits_list, action_list, memory_list = [], [], [], [], []
 
     obs = env.reset()
     _reset_model_memory(net)
@@ -200,11 +200,14 @@ def collect_rollout(net, env, num_frames):
         logits = _get_logits(net, obs_t)               # advances running_mem
         action = logits.argmax().item()
 
-        # Capture raw RGB before stepping — frame aligns with this decision
+        # Capture raw RGB and processed obs
         frames_rgb.append(env.unwrapped.ale.getScreenRGB().copy())
         obs_list.append(obs.copy())
         logits_list.append(logits.numpy().copy())
         action_list.append(action)
+
+        # SNAPSHOT: save memory AFTER this forward pass (for saliency of this frame)
+        memory_list.append(_snapshot_memory(net))
 
         obs, _, done, _ = env.step(action)
         if done:
@@ -212,7 +215,7 @@ def collect_rollout(net, env, num_frames):
             _reset_model_memory(net)
 
     print(f"[eval_saliency] Rollout complete ({num_frames} frames).")
-    return frames_rgb, obs_list, logits_list, action_list
+    return frames_rgb, obs_list, logits_list, action_list, memory_list
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -258,18 +261,22 @@ def _restore_memory(net, snap):
     net.prev_x_conv = snap[1].clone()
 
 
-def compute_sarfa_map(net, obs, logits, action, density, blur_radius):
+def compute_sarfa_map(net, obs, logits, action, density, blur_radius, mem_snap):
     """
     Compute a (H, W) SARFA saliency map for one frame.
 
     For each grid cell at stride `density`:
       1. Occlude the observation at that location.
-      2. Restore model memory to the pre-scan snapshot so every probe is
-         independent (the scan must never mutate the rollout's memory).
+      2. Restore model memory to mem_snap so every probe starts from the same
+         temporal state (the state that existed at this frame during rollout).
       3. Query the model for perturbed logits.
       4. Call computeSaliencyUsingSarfa(original_action, q_before, q_after).
 
     The score grid is bilinearly upsampled to (H, W) and normalised to [0, 1].
+
+    Args:
+        mem_snap: Tuple of (running_mem, prev_x_conv) cloned tensors, captured
+                  immediately after the real forward pass for this frame.
     """
     C, H, W   = obs.shape
     n_actions = len(logits)
@@ -281,7 +288,6 @@ def compute_sarfa_map(net, obs, logits, action, density, blur_radius):
     cols = list(range(0, W, density))
     score_grid = np.zeros((len(rows), len(cols)), dtype=np.float32)
 
-    mem_snap = _snapshot_memory(net)   # freeze state before the scan begins
     hx = cx  = torch.zeros(1)
 
     for gi, i in enumerate(rows):
@@ -357,7 +363,7 @@ def main():
     net, env = load_model_and_env(args)
 
     # ── Rollout ───────────────────────────────────────────────────────────────
-    frames_rgb, obs_list, logits_list, action_list = collect_rollout(
+    frames_rgb, obs_list, logits_list, action_list, memory_list = collect_rollout(
         net, env, args.num_frames
     )
 
@@ -368,11 +374,12 @@ def main():
     print(f"[eval_saliency] Computing SARFA maps "
           f"(density={args.density}, blur_radius={args.blur_radius})…")
 
-    for step, (raw_rgb, obs, logits, action) in enumerate(
-        zip(frames_rgb, obs_list, logits_list, action_list)
+    for step, (raw_rgb, obs, logits, action, mem_snap) in enumerate(
+        zip(frames_rgb, obs_list, logits_list, action_list, memory_list)
     ):
+        # Use per-frame memory snapshot — correct temporal context for this step
         sal_map  = compute_sarfa_map(
-            net, obs, logits, action, args.density, args.blur_radius
+            net, obs, logits, action, args.density, args.blur_radius, mem_snap
         )
         overlaid = overlay_saliency(raw_rgb, sal_map, alpha=args.alpha)
         overlaid_frames.append(overlaid)
