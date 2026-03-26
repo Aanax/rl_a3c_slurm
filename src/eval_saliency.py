@@ -167,20 +167,20 @@ def _reset_model_memory(net):
     net.prev_x_conv = torch.zeros((1, 64, 4, 4))
 
 
-def _get_logits(net, obs_t, level):
+def _get_logits(net, obs_t):
     """
-    One forward pass; returns actor logits from the 8-tuple output.
+    One forward pass; returns both level-1 and level-2 actor logits from
+    the 8-tuple output.
     Tuple layout: (V1, a1, hx, cx, None, None, V2, a2_logits)
-    Returns a1 logits (index 1) or a2 logits (index 7) based on level.
-
     stdout is suppressed to hide the debug print inside
     EncoderRules234_2_mem.forward() without touching src/model.py.
     """
     with contextlib.redirect_stdout(io.StringIO()):
         with torch.no_grad():
             out = net(obs_t, torch.zeros(1), torch.zeros(1))
-    idx = 1 if level == 'a1' else 7
-    return out[idx].squeeze(0)  # shape: (num_actions,)
+    a1_logits = out[1].squeeze(0)   # shape: (env.action_space.n,)
+    a2_logits = out[7].squeeze(0)   # shape: (a2 action size)
+    return a1_logits, a2_logits
 
 
 def collect_rollout(net, env, num_frames, level):
@@ -206,8 +206,9 @@ def collect_rollout(net, env, num_frames, level):
     print(f"[eval_saliency] Collecting {num_frames} rollout frames…")
     for step in range(num_frames):
         obs_t  = torch.FloatTensor(obs).unsqueeze(0)   # (1, 2, 80, 80)
-        logits = _get_logits(net, obs_t, level)        # advances running_mem
-        action = logits.argmax().item()
+        a1_logits, a2_logits = _get_logits(net, obs_t)   # advances running_mem
+        action = a1_logits.argmax().item()                # env action always based on a1
+        logits = a1_logits if level == 'a1' else a2_logits
 
         # Capture raw RGB and processed obs
         frames_rgb.append(env.unwrapped.ale.getScreenRGB().copy())
@@ -291,7 +292,12 @@ def compute_sarfa_map(net, obs, logits, action, density, blur_radius, mem_snap, 
     n_actions = len(logits)
     action_keys   = [str(i) for i in range(n_actions)]
     q_before      = {k: float(logits[int(k)]) for k in action_keys}
-    original_action = str(action)
+    if level == 'a1':
+        original_action = str(action)
+    else:
+        # For a2 saliency, SARFA "action" should be max a2-logit id,
+        # while env action remains the a1-level selected action.
+        original_action = str(int(np.argmax(logits)))
 
     rows = list(range(0, H, density))
     cols = list(range(0, W, density))
