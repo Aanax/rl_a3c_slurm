@@ -112,12 +112,12 @@ def test(args, shared_model, env_conf, frames_total):
                         with torch.cuda.device(gpu_id):
                             state_to_save = player.model.state_dict()
                             torch.save(
-                                state_to_save, f"{args.save_model_dir}{args.env}.dat"
+                                state_to_save, f"{args.log_dir}{args.experiment_name}_{args.parallel_id}.dat"
                             )
                     else:
                         state_to_save = player.model.state_dict()
                         torch.save(
-                            state_to_save, f"{args.save_model_dir}{args.env}.dat"
+                            state_to_save, f"{args.log_dir}{args.experiment_name}_{args.parallel_id}.dat"
                         )
 
                 reward_sum = 0
