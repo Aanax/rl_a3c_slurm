@@ -10,12 +10,13 @@
 #SBATCH -p hpc4-el7-gpu-3d
 
 # Usage:
-#   sbatch slurm_scripts/run_saliency.sh <config> <model_path> [num_frames]
+#   sbatch slurm_scripts/run_saliency.sh <config> <model_path> [level] [num_frames]
 #
 # Arguments:
 #   $1  path to .ini run config  (e.g. configs/run_config_our5.ini)
 #   $2  path to .pth checkpoint  (e.g. trained_models/best_model.pth)
-#   $3  number of frames to eval (optional, default: 200)
+#   $3  level to monitor ('a1' or 'a2', optional, default: 'a1')
+#   $4  number of frames to eval (optional, default: 200)
 #
 # Output:
 #   Per-frame PNGs + saliency.gif written to saliency_output/<job_id>/
@@ -24,7 +25,8 @@
 
 CONFIG=${1}
 MODEL_PATH=${2}
-NUM_FRAMES=${3:-200}
+LEVEL=${3:-a1}
+NUM_FRAMES=${4:-200}
 
 # ── conda environment setup (mirrors run_eval.sh) ─────────────────────────────
 # >>> conda initialize >>>
@@ -50,6 +52,7 @@ echo "conda env: $(conda info --envs | grep '*')"
 echo "------------------------------------------------------"
 echo "CONFIG     : ${CONFIG}"
 echo "MODEL_PATH : ${MODEL_PATH}"
+echo "LEVEL      : ${LEVEL}"
 echo "NUM_FRAMES : ${NUM_FRAMES}"
 echo "------------------------------------------------------"
 
@@ -57,6 +60,7 @@ echo "------------------------------------------------------"
 python /s/ls4/users/aamore/rl_a3c_pytorch/src/eval_saliency.py \
     --config     "${CONFIG}" \
     --model-path "${MODEL_PATH}" \
+    --level      "${LEVEL}" \
     --num-frames "${NUM_FRAMES}" \
     --output-dir "/s/ls4/users/aamore/rl_a3c_pytorch/saliency_output/${SLURM_JOBID}" \
     | tee /s/ls4/users/aamore/rl_a3c_pytorch/logs/saliency."${SLURM_JOBID}".log

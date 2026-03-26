@@ -14,6 +14,11 @@ Usage:
         --blur-radius 5 \\
         --output-dir ./saliency_output/pong_memrelu
 
+
+sbatch slurm_scripts/run_saliency.sh \
+    configs/run_config_our5.ini \
+    trained_models/PongNoFrameskip-v4_score21_step12345.dat
+
 No files under src/ or configs/ are modified by this script.
 """
 
@@ -76,6 +81,8 @@ def parse_args():
                    help='Root directory for output PNGs and GIF (default: ./saliency_output)')
     p.add_argument('--alpha',       type=float, default=0.5,
                    help='Heatmap overlay opacity 0-1 (default: 0.5)')
+    p.add_argument('--level',       choices=['a1', 'a2'], default='a1',
+                   help='Level to monitor for saliency (a1 or a2, default: a1)')
     cli = p.parse_args()
 
     # ── read .ini — mirrors every field that main.py reads ───────────────────
@@ -110,6 +117,7 @@ def parse_args():
     args.blur_radius = cli.blur_radius
     args.output_dir  = cli.output_dir
     args.alpha       = cli.alpha
+    args.level       = cli.level
 
     return args
 
@@ -159,11 +167,11 @@ def _reset_model_memory(net):
     net.prev_x_conv = torch.zeros((1, 64, 4, 4))
 
 
-def _get_logits(net, obs_t):
+def _get_logits(net, obs_t, level):
     """
     One forward pass; returns actor logits from the 8-tuple output.
     Tuple layout: (V1, a1, hx, cx, None, None, V2, a2_logits)
-    Actor logits are at index 1.
+    Returns a1 logits (index 1) or a2 logits (index 7) based on level.
 
     stdout is suppressed to hide the debug print inside
     EncoderRules234_2_mem.forward() without touching src/model.py.
@@ -171,10 +179,11 @@ def _get_logits(net, obs_t):
     with contextlib.redirect_stdout(io.StringIO()):
         with torch.no_grad():
             out = net(obs_t, torch.zeros(1), torch.zeros(1))
-    return out[1].squeeze(0)  # shape: (num_actions,)
+    idx = 1 if level == 'a1' else 7
+    return out[idx].squeeze(0)  # shape: (num_actions,)
 
 
-def collect_rollout(net, env, num_frames):
+def collect_rollout(net, env, num_frames, level):
     """
     Greedy policy rollout for num_frames steps.
 
@@ -197,7 +206,7 @@ def collect_rollout(net, env, num_frames):
     print(f"[eval_saliency] Collecting {num_frames} rollout frames…")
     for step in range(num_frames):
         obs_t  = torch.FloatTensor(obs).unsqueeze(0)   # (1, 2, 80, 80)
-        logits = _get_logits(net, obs_t)               # advances running_mem
+        logits = _get_logits(net, obs_t, level)        # advances running_mem
         action = logits.argmax().item()
 
         # Capture raw RGB and processed obs
@@ -261,7 +270,7 @@ def _restore_memory(net, snap):
     net.prev_x_conv = snap[1].clone()
 
 
-def compute_sarfa_map(net, obs, logits, action, density, blur_radius, mem_snap):
+def compute_sarfa_map(net, obs, logits, action, density, blur_radius, mem_snap, level):
     """
     Compute a (H, W) SARFA saliency map for one frame.
 
@@ -301,7 +310,8 @@ def compute_sarfa_map(net, obs, logits, action, density, blur_radius, mem_snap):
             with contextlib.redirect_stdout(io.StringIO()):
                 with torch.no_grad():
                     out = net(obs_t, hx, cx)
-            logits_p = out[1].squeeze(0).numpy()
+            idx = 1 if level == 'a1' else 7
+            logits_p = out[idx].squeeze(0).numpy()
 
             q_after = {k: float(logits_p[int(k)]) for k in action_keys}
             sal, *_ = computeSaliencyUsingSarfa(original_action, q_before, q_after)
@@ -364,7 +374,7 @@ def main():
 
     # ── Rollout ───────────────────────────────────────────────────────────────
     frames_rgb, obs_list, logits_list, action_list, memory_list = collect_rollout(
-        net, env, args.num_frames
+        net, env, args.num_frames, args.level
     )
 
     # ── SARFA scan ────────────────────────────────────────────────────────────
@@ -379,7 +389,7 @@ def main():
     ):
         # Use per-frame memory snapshot — correct temporal context for this step
         sal_map  = compute_sarfa_map(
-            net, obs, logits, action, args.density, args.blur_radius, mem_snap
+            net, obs, logits, action, args.density, args.blur_radius, mem_snap, args.level
         )
         overlaid = overlay_saliency(raw_rgb, sal_map, alpha=args.alpha)
         overlaid_frames.append(overlaid)
