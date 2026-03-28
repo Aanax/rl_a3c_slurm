@@ -1,8 +1,8 @@
 #!/bin/sh
 #SBATCH --job-name=rl_eval
-#SBATCH -D /s/ls4/users/aamore/rl_a3c_slurm/
-#SBATCH -o /s/ls4/users/aamore/rl_a3c_slurm/logs/%j.out
-#SBATCH -e /s/ls4/users/aamore/rl_a3c_slurm/logs/%j.err
+#SBATCH -D /s/ls4/users/aamore/rl_a3c_pytorch/
+#SBATCH -o /s/ls4/users/aamore/rl_a3c_pytorch/logs/%j.out
+#SBATCH -e /s/ls4/users/aamore/rl_a3c_pytorch/logs/%j.err
 #SBATCH -t 00:30:00
 #SBATCH --nodes 1
 #SBATCH --gres=gpu:1
@@ -24,8 +24,10 @@
 CONFIG="${1}"
 MODEL_PATH="${2}"
 
-export CUDA_HOME=/s/ls4/sw/cuda/10.1/
-export LD_LIBRARY_PATH="/s/ls4/sw/cuda/10.1/lib64:$LD_LIBRARY_PATH"
+export CUDA_HOME=/s/ls4/sw/cuda/10.2/
+export LD_LIBRARY_PATH="/s/ls4/sw/cuda/10.2/lib64:$LD_LIBRARY_PATH"
+
+module load intel-compilers cuda/10.2
 
 # >>> conda initialize >>>
 __conda_setup="$('/s/ls4/users/aamore/anaconda3/bin/conda' 'shell.bash' 'hook' 2> /dev/null)"
@@ -53,7 +55,7 @@ echo "MODEL_PATH : ${MODEL_PATH}"
 echo "------------------------------------------------------"
 
 # Build eval command with absolute paths
-EVAL_CMD="python /s/ls4/users/aamore/rl_a3c_slurm/src/eval.py --config ${CONFIG} --model-path ${MODEL_PATH} --on-cluster"
+EVAL_CMD="python /s/ls4/users/aamore/rl_a3c_pytorch/src/eval.py --config ${CONFIG} --model-path ${MODEL_PATH} --on-cluster"
 
 # Add any additional arguments (from $3 onwards)
 if [ $# -gt 2 ]; then
@@ -65,5 +67,5 @@ echo "Running: ${EVAL_CMD}"
 echo "------------------------------------------------------"
 
 # Run evaluation
-${EVAL_CMD} | tee /s/ls4/users/aamore/rl_a3c_slurm/logs/eval."${SLURM_JOBID}".log
+${EVAL_CMD} | tee /s/ls4/users/aamore/rl_a3c_pytorch/logs/eval."${SLURM_JOBID}".log
 
