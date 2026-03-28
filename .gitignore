@@ -9,3 +9,6 @@ TODO.md
 *.png
 sarfa-saliency/
 epic/
+RL_research_slim/
+RL_research_slim/*
+RL_research_slim*
