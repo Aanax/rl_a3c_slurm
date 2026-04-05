@@ -222,10 +222,11 @@ class EncoderRules234_2(nn.Module):
 
 class EncoderRules234_2_mem(nn.Module):
     """Encoder following Rules 2, 3, 4 - used by A3CRules2378 with more aggressive channel compression"""
-    def __init__(self):
+    def __init__(self, num_outputs=6):
         super(EncoderRules234_2_mem, self).__init__()
-        # More aggressive channel compression: 128 -> 16 channels
-        self.conv1 = nn.Conv2d(64+64, 32+32, 3, stride=1, padding=1)
+        # More aggressive channel compression: (64+64+num_outputs) -> (32+32+num_outputs) channels
+        self.num_outputs = num_outputs
+        self.conv1 = nn.Conv2d(64+64+num_outputs, 32+32+num_outputs, 3, stride=1, padding=1)
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -597,8 +598,8 @@ class Hierarchial_memory_action_memrelu(nn.Module):
         use_rmsnorm = getattr(args, 'use_rmsnorm', False)
         self.level1_encoder = EncoderRules234(num_inputs, latent_dim_conv=64, use_rmsnorm=use_rmsnorm)
         
-        # Level 2 encoder (uses state + state memory only)
-        self.level2_encoder = EncoderRules234_2_mem()
+        # Level 2 encoder (uses state + state memory + action spatial)
+        self.level2_encoder = EncoderRules234_2_mem(num_outputs)
         
         # Level 2 heads ((32+32)*4*4 = 512 input + action spatial)
         self.critic_linear2 = nn.Linear((32+32)*4*4 + self.num_outputs * 4 * 4, 1)
