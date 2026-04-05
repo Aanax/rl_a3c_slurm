@@ -1,4 +1,4 @@
-from __future__ import absolute_import
+n8from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 import torch
@@ -252,6 +252,43 @@ class EncoderRules234_2_mem(nn.Module):
         print(f"Final output shape: {x.shape}")
         return x, None, None, None
 
+
+class EncoderRules234_2_mem_action_mem(nn.Module):
+    """
+    Encoder for Hierarchial_memory_action_memrelu.
+    Takes state + state memory + action memory as input.
+    
+    Input: 64 (state) + 64 (state memory) + 64 (action memory) = 192 channels
+    Output: 32 + 32 + 32 = 96 channels after compression
+    """
+    def __init__(self):
+        super(EncoderRules234_2_mem_action_mem, self).__init__()
+        # Take state + state memory + action memory: 192 -> 96 channels
+        self.conv1 = nn.Conv2d(64+64+64, 32+32+32, 3, stride=1, padding=1)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        convs = [self.conv1]
+        gain = nn.init.calculate_gain('relu')
+        for conv in convs:
+            if conv.bias is not None:
+                conv.bias.data.fill_(0)
+            fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(conv.weight)
+            if conv is self.conv1:
+                fan = fan_in
+            else:
+                fan = (fan_in + fan_out) / 2
+            if fan > 0:
+                std = gain / math.sqrt(fan)
+                bound = math.sqrt(3.0) * std
+                nn.init.uniform_(conv.weight, -bound, bound)
+
+    def forward(self, x):
+        # Input shape: (batch, 192, 4, 4) = state + state_mem + action_mem
+        # Output shape: (batch, 96, 4, 4)
+        x = F.relu(self.conv1(x))
+        return x, None, None, None
+
 class Hierarchial(nn.Module):
     def __init__(self, num_inputs, action_space, args):
         super(Hierarchial, self).__init__()
@@ -437,6 +474,7 @@ class Hierarchial_memory_memrelu(nn.Module):
         super(Hierarchial_memory_memrelu, self).__init__()
         self.hidden_size = args.hidden_size
         self.gamma1 = args.gamma
+        self.num_outputs = action_space.n
         self.monitor_s = getattr(args, 'monitor_s', False)
         if self.monitor_s:
             self.s_values = []
@@ -449,36 +487,36 @@ class Hierarchial_memory_memrelu(nn.Module):
         
         # Level 2 encoder (64*4*4 input)
         self.level2_encoder = EncoderRules234_2_mem()
-
+        
         # Level 2 heads ((32+32)*4*4 = 512 input)
         self.critic_linear2 = nn.Linear((32+32)*4*4, 1)
         self.actor_linear2 = nn.Linear((32+32)*4*4, 16)
-
+        
         # Level 1 heads (64*4*4 = 1024 input + 1024 memory)
         self.critic_linear = nn.Linear(1024 + 1024, 1)
         self.actor_linear = nn.Linear(64*4*4 + 16, num_outputs)
-
+        
         # Initialize level 2 heads
         for linear in [self.critic_linear2, self.actor_linear2]:
             fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
             std = 1.0 / math.sqrt(fan_in)
             nn.init.normal_(linear.weight, mean=0.0, std=std)
             linear.bias.data.fill_(0)
-
+        
         # Initialize level 1 heads
         for linear in [self.critic_linear, self.actor_linear]:
             fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
             std = 1.0 / math.sqrt(fan_in)
             nn.init.normal_(linear.weight, mean=0.0, std=std)
             linear.bias.data.fill_(0)
-
+        
         self.actor_linear.weight.data.mul_(0.01)
         self.critic_linear.weight.data.mul_(1.0)
-
+        
         # Internal memory for running differences on features (level1 only)
         self.running_mem = torch.zeros((1,64,4,4))
         self.prev_x_conv = torch.zeros((1,64,4,4))
-
+        
         self.train()
 
     def forward(self, inputs, hx, cx, mem=None):
@@ -530,5 +568,188 @@ class Hierarchial_memory_memrelu(nn.Module):
         a1 = self.actor_linear(actor_input)
 
         return V1, a1, hx, cx, None, None, V2, a2_logits
+
+
+class Hierarchial_memory_action_memrelu(nn.Module):
+    """
+    Same as Hierarchial_memory_memrelu but with action memory added.
+    
+    Action memory is computed as: a_t-1 + g*a_t-2 + g^2*a_t-3 + ...
+    where g is the discount factor (gamma1).
+    
+    The previous action a_t-1 is passed as input to the forward method as a scalar index (0-5).
+    Action memory is computed in the same way as state memory and is passed to:
+    - Level 2 encoder (concatenated with state features)
+    - Level 1 critic (concatenated with flattened state features)
+    - Level 1 actor (passed through FC layer, then concatenated with a2_onehot)
+    """
+    def __init__(self, num_inputs, action_space, args):
+        super(Hierarchial_memory_action_memrelu, self).__init__()
+        self.hidden_size = args.hidden_size
+        self.gamma1 = args.gamma
+        self.num_outputs = action_space.n
+        
+        self.monitor_s = getattr(args, 'monitor_s', False)
+        if self.monitor_s:
+            self.s_values = []
+        
+        # Level 1 encoder (same as A3CRules2378)
+        use_rmsnorm = getattr(args, 'use_rmsnorm', False)
+        self.level1_encoder = EncoderRules234(num_inputs, latent_dim_conv=64, use_rmsnorm=use_rmsnorm)
+        
+        # Level 2 encoder (uses state + state memory only)
+        self.level2_encoder = EncoderRules234_2_mem()
+        
+        # Level 2 heads ((32+32)*4*4 = 512 input + action spatial)
+        self.critic_linear2 = nn.Linear((32+32)*4*4 + self.num_outputs * 4 * 4, 1)
+        self.actor_linear2 = nn.Linear((32+32)*4*4 + self.num_outputs * 4 * 4, 16)
+        
+        
+        # Level 1 heads
+        # Critic: state (1024) + state memory (1024) + action spatial (num_outputs * 4 * 4) + action mem vector (num_outputs)
+        self.critic_linear = nn.Linear(1024 + 1024 + self.num_outputs * 4 * 4 + self.num_outputs, 1)
+        # Actor: state (1024) + a2_onehot (16) + action memory vector (num_outputs)
+        self.actor_linear = nn.Linear(1024 + 16 + self.num_outputs, num_outputs)
+        
+        # Initialize level 2 encoder
+        gain = nn.init.calculate_gain('relu')
+        fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(self.level2_encoder.conv1.weight)
+        std = gain / math.sqrt(fan_in)
+        bound = math.sqrt(3.0) * std
+        with torch.no_grad():
+            self.level2_encoder.conv1.weight.uniform_(-bound, bound)
+            self.level2_encoder.conv1.bias.data.fill_(0)
+        
+        # Initialize level 2 heads
+        for linear in [self.critic_linear2, self.actor_linear2]:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
+            std = 1.0 / math.sqrt(fan_in)
+            nn.init.normal_(linear.weight, mean=0.0, std=std)
+            linear.bias.data.fill_(0)
+        
+        # Initialize level 1 heads
+        for linear in [self.critic_linear, self.actor_linear]:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
+            std = 1.0 / math.sqrt(fan_in)
+            nn.init.normal_(linear.weight, mean=0.0, std=std)
+            linear.bias.data.fill_(0)
+        
+        self.actor_linear.weight.data.mul_(0.01)
+        self.critic_linear.weight.data.mul_(1.0)
+        
+        # Internal memory for running differences on state features (level1 only)
+        self.running_mem = torch.zeros((1,64,4,4))
+        self.prev_x_conv = torch.zeros((1,64,4,4))
+        
+        # Internal memory for action (stores vector of size num_outputs)
+        self.running_memory_action = torch.zeros((1, num_outputs))
+        
+        self.train()
+
+    def forward(self, inputs, hx, cx, mem=None, action_prev=None):
+        """
+        Forward pass with action memory.
+        
+        Args:
+            inputs: Input tensor (batch_size, num_inputs, H, W)
+            hx: Hidden state (not used, reset to zero)
+            cx: Cell state (not used, reset to zero)
+            mem: Previous state memory (optional)
+            action_prev: Previous action a_t-1 as a vector of size num_outputs
+                        If None, uses zeros.
+        
+        Returns:
+            V1: Level 1 value estimate (batch_size, 1)
+            a1: Level 1 action logits (batch_size, num_outputs)
+            hx: Hidden state (zeros)
+            cx: Cell state (zeros)
+            mem: Updated state memory (spatial)
+            mem_action: Updated action memory (vector of size num_outputs)
+            V2: Level 2 value estimate (batch_size, 1)
+            a2_logits: Level 2 action logits (batch_size, 16)
+        """
+        # Level 1 encoding
+        s, _, _, _ = self.level1_encoder(inputs)  # s: 64*4*4
+
+        if self.monitor_s:
+            self.s_values.append(s.detach().cpu())
+
+        hx = torch.Tensor([0])
+        cx = torch.Tensor([0])
+
+        x_conv = s  # Keep as 4D tensor (64,4,4)
+        
+        # Handle action memory - use provided previous action or zeros
+        if action_prev is not None:
+            a_prev = action_prev  # Shape: (batch_size, num_outputs)
+        else:
+            batch_size = inputs.size(0)
+            a_prev = torch.zeros((batch_size, self.num_outputs), device=inputs.device)
+        
+        # Compute running state mem (same as Hierarchial_memory_memrelu)
+        if self.running_mem is None:
+            self.running_mem = torch.zeros_like(x_conv)
+        if self.prev_x_conv is not None:
+            diff = (x_conv - self.prev_x_conv).detach()
+            self.running_mem = (diff + self.gamma1 * self.running_mem).detach()
+
+        self.prev_x_conv = x_conv.detach()
+        
+        # Compute action memory: a_t-1 + g*a_t-2 + g^2*a_t-3 + ...
+        # Same recurrence as state memory, but for action vector
+        if self.running_memory_action is None:
+            self.running_memory_action = torch.zeros((x_conv.size(0), self.num_outputs), device=x_conv.device)
+        # a_t-1 (a_prev) + gamma * previous_running_memory_action
+        self.running_memory_action = (a_prev + self.gamma1 * self.running_memory_action).detach()
+
+        # Create copies of state memory and action memory through ReLU
+        mem_for_level2 = F.relu(self.running_mem.clone())
+        mem_for_critic = F.relu(self.running_mem.clone())
+        mem_for_action = F.relu(self.running_memory_action.clone())  # Shape: (batch, num_outputs)
+        
+        # Convert action memory to spatial dimensions with separate feature maps for each action value
+        # Create num_outputs channels (one per action), each channel is 4*4
+        # channel = action[i].repeat()
+        spatial_h, spatial_w = 4, 4
+        action_spatial = []
+        for i in range(self.num_outputs):
+            channel = mem_for_action[:, i:i+1]  # (batch, 1)
+            channel = channel.repeat(1, spatial_h * spatial_w)  # (batch, 16)
+            channel = channel.view(channel.size(0), 1, spatial_h, spatial_w)  # (batch, 1, 4, 4)
+            action_spatial.append(channel)
+        action_spatial = torch.cat(action_spatial, dim=1)  # (batch, num_outputs, 4, 4)
+        action_spatial = F.relu(action_spatial)
+
+        # Level 2 processing with state memory and action memory through ReLU
+        s2 = s
+        # Concatenate state, state memory, and action spatial along channel dimension (128 + num_outputs channels)
+        s2_input = torch.cat([s2, mem_for_level2, action_spatial], dim=1)  # 64 + 64 + num_outputs channels
+        s2, _, _, _ = self.level2_encoder(s2_input)  # s2: (32+32)*4*4 = 64*4*4 = 1024
+        s2_flat = s2.view(s2.size(0), -1)
+        a2_logits = self.actor_linear2(s2_flat)
+        V2 = self.critic_linear2(s2_flat)
+
+        # Sample from a2 probabilities to get one-hot binary vector
+        a2_probs = F.softmax(a2_logits, dim=1)
+        a2_sample = a2_probs.multinomial(1)  # Sample
+        a2_onehot = torch.zeros_like(a2_probs)
+        a2_onehot.scatter_(1, a2_sample, 1.0)  # Create binary
+        
+        # Level 1 processing
+        # Flatten features for linear layers
+        s_flat = x_conv.view(x_conv.size(0), -1)  # Shape: (batch, 1024)
+        # Use state memory + action spatial copies through ReLU for critic (state + state memory + action spatial + action vector)
+        critic_input = torch.cat([
+            s_flat, 
+            mem_for_critic.view(mem_for_critic.size(0), -1),
+            action_spatial.view(action_spatial.size(0), -1),
+            mem_for_action
+        ], dim=1)  # (batch, 1024 + 1024 + num_outputs * 16 + num_outputs)
+        V1 = self.critic_linear(critic_input)
+        # Actor uses state + a2_onehot + action memory vector
+        actor_input = torch.cat([s_flat, a2_onehot, mem_for_action], dim=1)  # (batch, 1024 + 16 + num_outputs)
+        a1 = self.actor_linear(actor_input)
+
+        return V1, a1, hx, cx, self.running_mem.clone(), self.running_memory_action.clone(), V2, a2_logits
 
 

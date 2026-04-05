@@ -186,7 +186,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             if not player.done:
                 state = player.state
                 model_output = player.model(
-                    state.unsqueeze(0), player.hx, player.cx
+                    state.unsqueeze(0), player.hx, player.cx, None, player.action_prev
                 )
                 value = model_output[0]
                 R = value.detach()
