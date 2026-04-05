@@ -642,7 +642,7 @@ class Hierarchial_memory_action_memrelu(nn.Module):
         self.prev_x_conv = torch.zeros((1,64,4,4))
         
         # Internal memory for action (stores vector of size num_outputs)
-        self.running_memory_action = torch.zeros((1, num_outputs))
+        self.running_memory_action = torch.zeros((1, self.num_outputs))
         
         self.train()
 
