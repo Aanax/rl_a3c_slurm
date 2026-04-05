@@ -34,7 +34,10 @@ class Agent(object):
 
     def action_train(self):
         # Prepare action_prev - convert from one-hot vector to pass to model
-        action_prev = self.action_prev
+        # Only pass action_prev for models with action memory (Hierarchial_memory_action_memrelu)
+        action_prev = None
+        if hasattr(self.args, 'model_type') and self.args.model_type == 'Hierarchial_memory_action_memrelu':
+            action_prev = self.action_prev
 
         current_state = self.state.unsqueeze(0)
         model_output = self.model(
@@ -143,7 +146,10 @@ class Agent(object):
                 self.action_prev = None
                 
             # Prepare action_prev for model
-            action_prev = self.action_prev
+            # Only pass action_prev for models with action memory (Hierarchial_memory_action_memrelu)
+            action_prev = None
+            if hasattr(self.args, 'model_type') and self.args.model_type == 'Hierarchial_memory_action_memrelu':
+                action_prev = self.action_prev
             
             model_output = self.model(
                 self.state.unsqueeze(0), self.hx, self.cx, None, action_prev
