@@ -609,7 +609,7 @@ class Hierarchial_memory_action_memrelu(nn.Module):
         # Critic: state (1024) + state memory (1024) + action spatial (num_outputs * 4 * 4) + action mem vector (num_outputs)
         self.critic_linear = nn.Linear(1024 + 1024 + self.num_outputs * 4 * 4 + self.num_outputs, 1)
         # Actor: state (1024) + a2_onehot (16) + action memory vector (num_outputs)
-        self.actor_linear = nn.Linear(1024 + 16 + self.num_outputs, num_outputs)
+        self.actor_linear = nn.Linear(1024 + 16 + self.num_outputs, self.num_outputs)
         
         # Initialize level 2 encoder
         gain = nn.init.calculate_gain('relu')
