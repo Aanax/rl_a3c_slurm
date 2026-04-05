@@ -24,7 +24,7 @@ Options:
     --window-size SIZE        Window size for value plots (default: 34)
 
 Example:
-    python src/draw_eval_gifs.py Eval_2024-12-04_21:58:10_cosineFix2_try2.468102
+    python src/draw_eval_gifs.py Eval_2026-03-29_00:21:09_PongNoFrameskip-v4 --remote-path /home/users/aamore/rl_a3c_pytorch/logs/eval/
 """
 
 import torch
@@ -109,10 +109,18 @@ def draw_frames_with_info(values, images, experiment_title, start_idx=0, stop_id
         # Plot image - handle different input formats
         img = images[idx]
         if len(img.shape) == 3:
-            if img.shape[0] in [1, 3]:  # (C, H, W) format
-                img_display = img[0] if img.shape[0] == 1 else np.transpose(img, (1, 2, 0))
-            else:  # (H, W, C) format
-                img_display = img[:, :, 0] if img.shape[2] == 1 else img
+            if img.shape[0] == 1:  # (1, H, W) - single channel
+                img_display = img[0]
+            elif img.shape[0] == 2:  # (2, H, W) - two channels, use first
+                img_display = img[0]
+            elif img.shape[0] == 3:  # (3, H, W) - RGB
+                img_display = np.transpose(img, (1, 2, 0))
+            elif img.shape[2] == 1:  # (H, W, 1) format
+                img_display = img[:, :, 0]
+            elif img.shape[2] in [2, 3, 4]:  # (H, W, C) format
+                img_display = img  # Already in right format
+            else:  # Unknown format, just use first channel
+                img_display = img[0] if img.shape[0] < img.shape[2] else img[:, :, 0]
         elif len(img.shape) == 2:
             img_display = img
         else:
@@ -123,6 +131,7 @@ def draw_frames_with_info(values, images, experiment_title, start_idx=0, stop_id
         # Add drawing to results
         fig.tight_layout(pad=pad)
         fig.canvas.draw()
+        fig.canvas.flush_events()
         # Get RGB data from figure canvas (compatible with both old and new matplotlib)
         width, height = fig.canvas.get_width_height()
         if hasattr(fig.canvas, 'buffer_rgba'):
@@ -143,12 +152,12 @@ def draw_frames_with_info(values, images, experiment_title, start_idx=0, stop_id
             image_from_plot = buf[:, :, 1:]
         else:
             raise RuntimeError("Cannot get RGB data from figure canvas")
-        results.append(image_from_plot)
-
-        # Clear for the next frame
+        results.append(image_from_plot.copy())
+        
+        # Clear for the next frame - use cla() and remove all artists
         for value_name in axs:
-            axs[value_name].clear()
-        image_axs.clear()
+            axs[value_name].cla()
+        image_axs.cla()
 
     plt.close(fig)
     return results
@@ -325,9 +334,11 @@ def create_action_gif(data, eval_folder, local_dir, fps=3, start_idx=0, stop_idx
     # Build values dict
     values_dict = {}
     if Q_ext is not None:
-        values_dict['Q_ext'] = {'value': Q_ext, 'legend': action_legend[:Q_ext.shape[1]] if len(Q_ext.shape) > 1 else action_legend}
+        # Q22s = level 2 logits (16-dim for a2)
+        values_dict['logits2 (level2)'] = {'value': Q_ext, 'legend': [str(i) for i in range(Q_ext.shape[1])]}
     if Q_int is not None:
-        values_dict['Q_int'] = {'value': Q_int, 'legend': action_legend[:Q_int.shape[1]] if len(Q_int.shape) > 1 else action_legend}
+        # Q11s = level 1 logits (action space dim for a1)
+        values_dict['logits1 (level1)'] = {'value': Q_int, 'legend': action_legend[:Q_int.shape[1]] if len(Q_int.shape) > 1 else action_legend}
     if actions is not None:
         # Squeeze actions if needed
         if len(actions.shape) > 1:
@@ -384,16 +395,16 @@ def create_values_gif(data, eval_folder, local_dir, fps=3, start_idx=0, stop_idx
     # Build values dict
     values_dict = {}
     
-    # Combine V1 and V2
+    # Combine V1 and V2 with clear labels
     if Vs is not None and Vs2 is not None:
         values_dict['V1_and_V2'] = {
             'value': np.hstack([Vs, Vs2]),
-            'legend': ["V_ext", "V_int"]
+            'legend': ["V1 (level1)", "V2 (level2)"]
         }
     elif Vs is not None:
-        values_dict['V1'] = {'value': Vs}
+        values_dict['V1 (level1)'] = {'value': Vs}
     elif Vs2 is not None:
-        values_dict['V2'] = {'value': Vs2}
+        values_dict['V2 (level2)'] = {'value': Vs2}
     
     if rewards is not None:
         values_dict['reward'] = {'value': rewards}
