@@ -598,6 +598,9 @@ class Hierarchial_memory_action_memrelu(nn.Module):
         use_rmsnorm = getattr(args, 'use_rmsnorm', False)
         self.level1_encoder = EncoderRules234(num_inputs, latent_dim_conv=64, use_rmsnorm=use_rmsnorm)
         
+        # Extract num_outputs before using it
+        num_outputs = action_space.n
+        
         # Level 2 encoder (uses state + state memory + action spatial)
         self.level2_encoder = EncoderRules234_2_mem(num_outputs)
         
