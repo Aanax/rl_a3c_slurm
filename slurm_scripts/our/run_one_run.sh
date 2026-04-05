@@ -5,7 +5,7 @@
 #SBATCH -t 72:00:00
 #SBATCH --cpus-per-task=4
 #SBATCH --gres=gpu:2
-#SBATCH -p hpc5-el7-gpu-3d
+#SBATCH -p hpc4-el7-gpu-3d
 
 export CUDA_HOME=/s/ls4/sw/cuda/10.2/
 export LD_LIBRARY_PATH="/s/ls4/sw/cuda/10.2/lib64:$LD_LIBRARY_PATH"
