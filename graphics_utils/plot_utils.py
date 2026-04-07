@@ -424,3 +424,77 @@ def draw_meanIntep_with_colored_runs(mean, runs, new_x, n_tests=None,
     ax.grid(True, alpha=0.3)
     
     return ax
+
+
+def load_monitor_losses(losses_dir):
+    """Load monitored loss CSVs (losses_rank*.csv) into a dict {rank: DataFrame}."""
+    import glob
+    import re
+
+    csv_paths = sorted(glob.glob(os.path.join(losses_dir, "losses_rank*.csv")))
+    losses_by_rank = {}
+    for path in csv_paths:
+        match = re.search(r"losses_rank(\d+)\.csv$", os.path.basename(path))
+        if match is None:
+            continue
+        rank = int(match.group(1))
+        losses_by_rank[rank] = pd.read_csv(path)
+    return losses_by_rank
+
+
+def plot_monitor_losses(losses_dir, aggregate="mean", figsize=(12, 10)):
+    """
+    Plot monitor losses saved by train.py when args.monitor_losses=True.
+    Expected files: losses_rank*.csv with columns:
+    batch_num, policy_loss, value_loss, kld_loss, restoration_loss.
+    """
+    losses_by_rank = load_monitor_losses(losses_dir)
+    if not losses_by_rank:
+        raise FileNotFoundError(f"No losses_rank*.csv found in: {losses_dir}")
+
+    loss_cols = ["policy_loss", "value_loss", "kld_loss", "restoration_loss", "value_intrinsic_loss"]
+    fig, axes = plt.subplots(3, 2, figsize=figsize, sharex=True)
+    axes = axes.flatten()
+
+    if aggregate is None:
+        for rank, df in sorted(losses_by_rank.items()):
+            for ax, col in zip(axes, loss_cols):
+                if col in df.columns:
+                    ax.plot(df["batch_num"], df[col], alpha=0.8, label=f"rank {rank}")
+        for ax in axes:
+            ax.legend()
+    else:
+        agg = aggregate.lower()
+        for ax, col in zip(axes, loss_cols):
+            curves = []
+            x_ref = None
+            for _, df in sorted(losses_by_rank.items()):
+                if col not in df.columns:
+                    continue
+                n = len(df)
+                if x_ref is None or n < len(x_ref):
+                    x_ref = df["batch_num"].values
+                curves.append(df[col].values)
+            if not curves:
+                continue
+            min_len = min(len(c) for c in curves)
+            arr = np.stack([c[:min_len] for c in curves], axis=0)
+            x = x_ref[:min_len]
+            if agg == "median":
+                y = np.median(arr, axis=0)
+                label = "median across ranks"
+            else:
+                y = np.mean(arr, axis=0)
+                label = "mean across ranks"
+            ax.plot(x, y, label=label)
+            ax.legend()
+
+    for ax, col in zip(axes, loss_cols):
+        ax.set_title(col)
+        ax.grid(alpha=0.3)
+    for ax in axes[len(loss_cols):]:
+        ax.axis("off")
+    axes[-1].set_xlabel("batch_num")
+    axes[-2].set_xlabel("batch_num")
+    fig.tight_layout()
+    return fig, axes

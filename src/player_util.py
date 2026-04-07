@@ -4,6 +4,7 @@ os.environ["OMP_NUM_THREADS"] = "1"
 import torch
 import torch.nn.functional as F
 from torch.autograd import Variable
+import model as model_module
 
 
 class Agent(object):
@@ -17,6 +18,7 @@ class Agent(object):
         self.args = args
         self.values = []
         self.values2 = []  # V2 values for hierarchical models
+        self.values_intrinsic = []
         self.log_probs = []
         self.log_probs2 = []  # Actor2 log probs for hierarchical models
         self.rewards = []
@@ -25,6 +27,7 @@ class Agent(object):
         self.x_restoreds = []
         self.kls = []
         self.states = []
+        self.next_states = []
         self.done = True
         self.info = None
         self.reward = 0
@@ -41,6 +44,7 @@ class Agent(object):
             value, logit, self.hx, self.cx = model_output
             x_restored = None
             kl = None
+            value_intrinsic = None
             value2 = None
             logit2 = None
         elif len(model_output) == 5:
@@ -48,8 +52,14 @@ class Agent(object):
             kl = None
             value2 = None
             logit2 = None
+            value_intrinsic = None
         elif len(model_output) == 6:
-            value, logit, self.hx, self.cx, x_restored, kl = model_output
+            if isinstance(self.model, (model_module.A3CRules2378OracleIntrinsicCritic, model_module.A3CRules2378OracleFCIntrinsicCritic)):
+                value, logit, self.hx, self.cx, x_restored, value_intrinsic = model_output
+                kl = None
+            else:
+                value, logit, self.hx, self.cx, x_restored, kl = model_output
+                value_intrinsic = None
             value2 = None
             logit2 = None
         elif len(model_output) == 8:
@@ -94,9 +104,11 @@ class Agent(object):
         self.eps_len += 1
         self.reward = max(min(self.reward, 1), -1)
         self.values.append(value)
+        self.values_intrinsic.append(value_intrinsic if value_intrinsic is not None else value.detach())
         self.log_probs.append(log_prob)
         self.rewards.append(self.reward)
         self.states.append(current_state)
+        self.next_states.append(self.state.unsqueeze(0))
         if x_restored is not None:
             self.x_restoreds.append(x_restored)
         if kl is not None:
@@ -144,6 +156,7 @@ class Agent(object):
     def clear_actions(self):
         self.values = []
         self.values2 = []
+        self.values_intrinsic = []
         self.log_probs = []
         self.log_probs2 = []
         self.rewards = []
@@ -151,5 +164,6 @@ class Agent(object):
         self.entropies2 = []
         self.x_restoreds = []
         self.kls = []
+        self.next_states = []
         self.states = []
         return self

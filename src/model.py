@@ -532,3 +532,192 @@ class Hierarchial_memory_memrelu(nn.Module):
         return V1, a1, hx, cx, None, None, V2, a2_logits
 
 
+class DecoderRules234(nn.Module):
+    def __init__(self, num_inputs, use_rmsnorm=False):
+        super(DecoderRules234, self).__init__()
+        self.use_rmsnorm = use_rmsnorm
+        # Mirror of EncoderRules234 convolutions in reverse order.
+        self.deconv4 = nn.ConvTranspose2d(64, 64, 3, stride=1, padding=1)
+        self.deconv3 = nn.ConvTranspose2d(64, 32, 4, stride=1, padding=1)
+        self.deconv2 = nn.ConvTranspose2d(32, 32, 5, stride=1, padding=1)
+        self.deconv1 = nn.ConvTranspose2d(32, num_inputs, 5, stride=1, padding=2)
+
+    def forward(self, x):
+        if self.use_rmsnorm and x.dim() == 2:
+            spatial = int(math.sqrt(x.size(1) // 64))
+            x = x.view(x.size(0), 64, spatial, spatial)
+        # Undo max-pool stages with target spatial sizes for 80x80 inputs.
+        x = F.interpolate(x, size=(9, 9), mode="nearest")
+        x = F.relu(self.deconv4(x))
+        x = F.interpolate(x, size=(18, 18), mode="nearest")
+        x = F.relu(self.deconv3(x))
+        x = F.interpolate(x, size=(38, 38), mode="nearest")
+        x = F.relu(self.deconv2(x))
+        x = F.interpolate(x, size=(80, 80), mode="nearest")
+        x = self.deconv1(x)
+        return x
+
+
+class DecoderRules234FC(DecoderRules234):
+    """Decoder for FC features: hidden -> 1024 -> mirrored DecoderRules234 topology."""
+    def __init__(self, hidden_size, num_inputs):
+        super(DecoderRules234FC, self).__init__(num_inputs, use_rmsnorm=False)
+        self.fc = nn.Linear(hidden_size, 1024)
+
+    def forward(self, x):
+        x = self.fc(x)
+        x = x.view(x.size(0), 64, 4, 4)
+        return super(DecoderRules234FC, self).forward(x)
+
+
+class A3CRules2378Oracle(A3CRules2378):
+    """A3CRules2378Mem with decoder and addtional loss.
+
+    1. Делаем декодер и добавляем лосс как в oracle (без fc)
+    2. Восстанавлиаем из fc
+    3. Передаем выход декодера в критика
+
+    делаем сначала без памяти
+    батч сайз 32
+    4. Добавляем память
+
+    The decoder reconstructs the input from the encoder feature map or RMSNorm-flattened
+    representation, and the forward returns x_restored for the restoration loss in train.py.
+    """
+    def __init__(self, num_inputs, action_space, args):
+        super(A3CRules2378Oracle, self).__init__(num_inputs, action_space, args)
+        self.hidden_size = args.hidden_size
+        self.monitor_s = getattr(args, 'monitor_s', False)
+        if self.monitor_s:
+            self.s_values = []
+        
+        use_rmsnorm = getattr(args, 'use_rmsnorm', False)
+        self.encoder = EncoderRules234(num_inputs, latent_dim_conv=64, use_rmsnorm=use_rmsnorm)
+        self.decoder = DecoderRules234(num_inputs, use_rmsnorm=use_rmsnorm)
+
+        num_outputs = action_space.n
+        # Oracle path: actor/critic/decoder consume encoder features directly.
+        self.critic_linear = nn.Linear(1024, 1)
+        self.actor_linear = nn.Linear(1024, num_outputs)
+
+        # Heads initialization Rule 8: gaussian init with only fan_in
+        for linear in [self.critic_linear, self.actor_linear]:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
+            std = 1.0 / math.sqrt(fan_in)
+            nn.init.normal_(linear.weight, mean=0.0, std=std)
+            linear.bias.data.fill_(0)
+
+        self.actor_linear.weight.data.mul_(0.01)
+        self.critic_linear.weight.data.mul_(1.0)
+
+        self.train()
+
+    def forward(self, inputs, hx, cx, mem=None):
+        x, _, _, _ = self.encoder(inputs)
+
+        s = x.view(x.size(0), -1)
+
+        if self.monitor_s:
+            self.s_values.append(s.detach().cpu())
+
+        x_restored = self.decoder(x)
+
+        hx = torch.Tensor([0])
+        cx = torch.Tensor([0])
+
+        return self.critic_linear(s), self.actor_linear(s), hx, cx, x_restored
+
+
+class A3CRules2378OracleFC(A3CRules2378Oracle):
+    """A3CRules2378Oracle variant that decodes from FC activations instead of encoder output."""
+    def __init__(self, num_inputs, action_space, args):
+        super(A3CRules2378OracleFC, self).__init__(num_inputs, action_space, args)
+        num_outputs = action_space.n
+        self.fc = nn.Linear(1024, self.hidden_size)
+        self.critic_linear = nn.Linear(self.hidden_size, 1)
+        self.actor_linear = nn.Linear(self.hidden_size, num_outputs)
+        self.decoder = DecoderRules234FC(self.hidden_size, num_inputs)
+
+        fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(self.fc.weight)
+        fan = (fan_in + fan_out) / 2
+        gain = nn.init.calculate_gain("relu")
+        std = gain / math.sqrt(fan)
+        bound = math.sqrt(3.0) * std
+        with torch.no_grad():
+            self.fc.weight.uniform_(-bound, bound)
+        self.fc.bias.data.fill_(0)
+
+        for linear in [self.critic_linear, self.actor_linear]:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
+            std = 1.0 / math.sqrt(fan_in)
+            nn.init.normal_(linear.weight, mean=0.0, std=std)
+            linear.bias.data.fill_(0)
+
+        self.actor_linear.weight.data.mul_(0.01)
+        self.critic_linear.weight.data.mul_(1.0)
+
+    def forward(self, inputs, hx, cx, mem=None):
+        x, _, _, _ = self.encoder(inputs)
+        s = x.view(x.size(0), -1)
+
+        if self.monitor_s:
+            self.s_values.append(s.detach().cpu())
+
+        hx = torch.Tensor([0])
+        cx = torch.Tensor([0])
+
+        x = F.relu(self.fc(s))
+        x_restored = self.decoder(x)
+
+        return self.critic_linear(x), self.actor_linear(x), hx, cx, x_restored
+
+
+class A3CRules2378OracleIntrinsicCritic(A3CRules2378Oracle):
+    """A3CRules2378Oracle with an additional intrinsic critic head."""
+    def __init__(self, num_inputs, action_space, args):
+        super(A3CRules2378OracleIntrinsicCritic, self).__init__(num_inputs, action_space, args)
+        self.critic_linear_intrinsic = nn.Linear(1024, 1)
+        fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.critic_linear_intrinsic.weight)
+        std = 1.0 / math.sqrt(fan_in)
+        nn.init.normal_(self.critic_linear_intrinsic.weight, mean=0.0, std=std)
+        self.critic_linear_intrinsic.bias.data.fill_(0)
+        self.critic_linear_intrinsic.weight.data.mul_(1.0)
+
+    def forward(self, inputs, hx, cx, mem=None):
+        x, _, _, _ = self.encoder(inputs)
+        s = x.view(x.size(0), -1)
+
+        if self.monitor_s:
+            self.s_values.append(s.detach().cpu())
+
+        x_restored = self.decoder(x)
+        hx = torch.Tensor([0])
+        cx = torch.Tensor([0])
+        value_intrinsic = self.critic_linear_intrinsic(s)
+        return self.critic_linear(s), self.actor_linear(s), hx, cx, x_restored, value_intrinsic
+
+
+class A3CRules2378OracleFCIntrinsicCritic(A3CRules2378OracleFC):
+    """A3CRules2378OracleFC with an additional intrinsic critic head."""
+    def __init__(self, num_inputs, action_space, args):
+        super(A3CRules2378OracleFCIntrinsicCritic, self).__init__(num_inputs, action_space, args)
+        self.critic_linear_intrinsic = nn.Linear(self.hidden_size, 1)
+        fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.critic_linear_intrinsic.weight)
+        std = 1.0 / math.sqrt(fan_in)
+        nn.init.normal_(self.critic_linear_intrinsic.weight, mean=0.0, std=std)
+        self.critic_linear_intrinsic.bias.data.fill_(0)
+        self.critic_linear_intrinsic.weight.data.mul_(1.0)
+
+    def forward(self, inputs, hx, cx, mem=None):
+        x, _, _, _ = self.encoder(inputs)
+        s = x.view(x.size(0), -1)
+
+        if self.monitor_s:
+            self.s_values.append(s.detach().cpu())
+
+        hx = torch.Tensor([0])
+        cx = torch.Tensor([0])
+        x = F.relu(self.fc(s))
+        x_restored = self.decoder(x)
+        value_intrinsic = self.critic_linear_intrinsic(x)
+        return self.critic_linear(x), self.actor_linear(x), hx, cx, x_restored, value_intrinsic

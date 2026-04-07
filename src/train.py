@@ -4,6 +4,8 @@ os.environ["OMP_NUM_THREADS"] = "1"
 from setproctitle import setproctitle as ptitle
 import torch
 import torch.optim as optim
+import torch.nn.functional as F
+
 from environment import atari_env
 from utils import ensure_shared_grads
 import model
@@ -111,7 +113,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
         loss_csv_path = f"{log_dir_path}losses_rank{rank}.csv"
         with open(loss_csv_path, 'w', newline='') as csvfile:
             writer = csv.writer(csvfile)
-            writer.writerow(['batch_num', 'policy_loss', 'value_loss', 'kld_loss', 'restoration_loss'])
+            writer.writerow(['batch_num', 'policy_loss', 'value_loss', 'value_intrinsic_loss', 'kld_loss', 'restoration_loss'])
     try:
         while 1:
             if gpu_id >= 0:
@@ -174,14 +176,18 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             if gpu_id >= 0:
                 with torch.cuda.device(gpu_id):
                     R = torch.zeros(1, 1).cuda()
+                    R_intrinsic = torch.zeros(1, 1).cuda()
                     gae = torch.zeros(1, 1).cuda()
                     R2 = torch.zeros(1, 1).cuda()
                     gae2 = torch.zeros(1, 1).cuda()
+                    gae_intrinsic = torch.zeros(1, 1).cuda()
             else:
                 R = torch.zeros(1, 1)
+                R_intrinsic = torch.zeros(1, 1)
                 gae = torch.zeros(1, 1)
                 R2 = torch.zeros(1, 1)
                 gae2 = torch.zeros(1, 1)
+                gae_intrinsic = torch.zeros(1, 1)
             model_output = None
             if not player.done:
                 state = player.state
@@ -190,11 +196,16 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 )
                 value = model_output[0]
                 R = value.detach()
+                if isinstance(player.model, (model.A3CRules2378OracleIntrinsicCritic, model.A3CRules2378OracleFCIntrinsicCritic)) and len(model_output) >= 6:
+                    R_intrinsic = model_output[5].detach()
+                else:
+                    R_intrinsic = value.detach()
                 # For hierarchical models, also get V2
                 if len(model_output) >= 8:
                     value2 = model_output[6]
                     R2 = value2.detach()
             player.values.append(R)
+            player.values_intrinsic.append(R_intrinsic)
             # Check if model is hierarchical (has V2 and a2 outputs)
             # If values2 was populated during action_train, model is hierarchical
             is_hierarchical = len(player.values2) > 0
@@ -204,6 +215,8 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 player.values2.append(R2)
             policy_loss = 0
             value_loss = 0
+            value_intrinsic_loss = 0
+            restoration_loss = 0
             policy_loss2 = 0
             value_loss2 = 0
             
@@ -218,6 +231,9 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 # V2Target = V2[H].detach() - use the last value2 (bootstrap)
                 V2Target = player.values2[-1].detach()
             
+
+            if args.w_restoration_loss > 0 and len(player.x_restoreds) > 0:
+                G_t = player.x_restoreds[-1].clone()
             for i in reversed(range(len(player.rewards))):
                 R = args.gamma * R + player.rewards[i]
                 advantage = R - player.values[i]
@@ -229,6 +245,36 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     + args.gamma * player.values[i + 1].data
                     - player.values[i].data
                 )
+
+                # Intrinsic critic target (oracle reward).
+                if args.w_restoration_loss > 0 and len(player.x_restoreds) > i and len(player.states) > i:
+                    G_t = G_t * args.gamma_restoration + player.next_states[i] - player.states[i]
+
+                    cosine = F.cosine_similarity(
+                        player.x_restoreds[i].detach().view(-1),
+                        G_t.detach().view(-1), 
+                        dim=0
+                    ).squeeze(0)
+                    oracle_r = (1.0 - args.gamma) * cosine
+
+                    R_intrinsic = args.gamma * R_intrinsic + oracle_r
+                    intrinsic_advantage = R_intrinsic - player.values_intrinsic[i]
+                    value_intrinsic_loss = value_intrinsic_loss + 0.5 * intrinsic_advantage.pow(2)
+
+                    delta_t_intrinsic = (
+                        oracle_r
+                        + args.gamma * player.values_intrinsic[i + 1].data
+                        - player.values_intrinsic[i].data
+                    )
+
+                    cosine = -F.cosine_similarity(
+                        player.x_restoreds[i].view(-1),
+                        G_t.detach().view(-1),
+                        dim=0,
+                    )
+                    restoration_loss = restoration_loss + args.w_restoration_loss * cosine * delta_t
+                else:
+                    delta_t_intrinsic = 0.0
 
                 # Level 2 loss
                 delta_t2 = None
@@ -263,9 +309,10 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 else:
                     gae = gae * args.gamma * args.tau + delta_t
                     
+                gae_intrinsic = gae_intrinsic * args.gamma * args.tau + delta_t_intrinsic
                 policy_loss = (
                     policy_loss
-                    - (player.log_probs[i] * gae)
+                    - (player.log_probs[i] * (gae + gae_intrinsic))
                     - (args.entropy_coef * player.entropies[i])
                 )
                 
@@ -279,14 +326,11 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
 
             # Additional losses for VAE models (only compute if weights > 0)
             kld_loss = 0
-            restoration_loss = 0
-            if args.w_kld_loss > 0 or args.w_restoration_loss > 0:
+            if args.w_kld_loss > 0:
                 batch_size = len(player.rewards)
                 for i in range(len(player.rewards)):
                     if args.w_kld_loss > 0 and len(player.kls) > i:
                         kld_loss += args.w_kld_loss * player.kls[i]
-                    if args.w_restoration_loss > 0 and len(player.x_restoreds) > i:
-                        restoration_loss += args.w_restoration_loss * (player.x_restoreds[i] - player.states[i].detach()).pow(2).mean()
 
             # Combine critic1 loss with critic2 loss
             if is_hierarchical:
@@ -298,6 +342,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             else:
                 total_loss = policy_loss + 0.5 * value_loss + kld_loss + restoration_loss
 
+                total_loss = total_loss + 0.5 * value_intrinsic_loss
             player.model.zero_grad()
             total_loss.backward()
             ensure_shared_grads(player.model, shared_model, gpu=gpu_id >= 0)
@@ -327,6 +372,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                         (0.5 * value_loss).item(),
                         kld_loss.item() if isinstance(kld_loss, torch.Tensor) else kld_loss,
                         restoration_loss.item() if isinstance(restoration_loss, torch.Tensor) else restoration_loss
+                        (0.5 * value_intrinsic_loss).item(),
                     ])
 
             player.clear_actions()
