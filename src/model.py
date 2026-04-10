@@ -665,7 +665,7 @@ class Hierarchial_memory_action_memrelu(nn.Module):
     - Level 1 actor (passed through FC layer, then concatenated with a2_onehot)
     """
     def __init__(self, num_inputs, action_space, args):
-        super(Hierarchial_memory_action_memrelu2, self).__init__()
+        super(Hierarchial_memory_action_memrelu, self).__init__()
         self.hidden_size = args.hidden_size
         self.gamma1 = args.gamma
         self.gamma2 = getattr(args, 'gamma2', 0.99)  # Default gamma2 value
