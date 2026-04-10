@@ -855,4 +855,4 @@ class Hierarchial_memory_action_memrelu(nn.Module):
         actor_input = torch.cat([s_flat, a2_onehot], dim=1)  # (batch, 1024 + 16 + num_outputs)
         a1 = self.actor_linear(actor_input)
 
-        return V1, a1, hx, cx, self.running_mem.clone(), self.running_memory_action.clone(), V2, a2_logits
+        return V1, a1, hx, cx, None, None, V2, a2_logits
