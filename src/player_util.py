@@ -84,8 +84,7 @@ class Agent(object):
             self.log_probs2.append(log_prob2)
             self.values2.append(value2)
         
-        # Store action_prev as one-hot vector from current action for next timestep
-        # Convert action scalar to one-hot vector
+        # chosen action to onehot
         batch_size = 1
         num_outputs = logit.size(1)
         if self.gpu_id >= 0:
