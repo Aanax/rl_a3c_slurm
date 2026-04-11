@@ -313,7 +313,7 @@ def normalize_action_memory(action_vector, spatial_h=4, spatial_w=4):
 
     Args:
         action_vector: Action vector of shape (batch_size, num_actions)
-        spatial_h: Height of spatial representation
+        spatial_h: Height of spatial representation (nouse)
         spatial_w: Width of spatial representation
 
     Returns:
@@ -322,8 +322,9 @@ def normalize_action_memory(action_vector, spatial_h=4, spatial_w=4):
     # Calculate L2 norm along the action dimension (dim=1)
     l2_norm = torch.norm(action_vector, p=2, dim=1, keepdim=True)
 
-    # Calculate the full dimension of feature maps: num_actions * spatial_h * spatial_w
-    full_dim = action_vector.size(1) * spatial_h * spatial_w
+    # Calc the full dim: num_actions * spatial_h * spatial_w
+    full_dim = action_vector.view(action_vector.size(0), -1)
+    full_dim = full_dim.size(1)
     scaling_factor = math.sqrt(full_dim)
 
     # Apply normalization: (A/norm_L2(A)) * sqrt(dim(A))
@@ -801,21 +802,14 @@ class Hierarchial_memory_action_memrelu(nn.Module):
 
         # Normalize A1 and A2 using L2 normalization with scaling
         # Formula: (A/norm_L2(A)) * sqrt(dim(A)) where dim(A) is full feature map dimension
-        A1_normalized = normalize_action_memory(self.A1.clone())
+        A1_normalized = normalize_action_memory(self.A1.clone(), spatial_h=s2.size(2), spatial_w=s2.size(3))
         A2_normalized = normalize_action_memory(self.A2.clone())
-
-        # Create A1 for level 2 encoder input - convert to spatial dimensions
-        # A1_for_level2 =(A1_normalized)  # Shape: (batch, num_outputs)
 
         # Create copies of state memory and action memory through ReLU
         mem_for_level2 = F.relu(self.running_mem.clone())
         mem_for_critic = F.relu(self.running_mem.clone())
-        # mem_for_action = F.relu(A1_normalized)  # Shape: (batch, num_outputs) - use normalized A1
 
-        # Convert action memory to spatial dimensions with separate feature maps for each action value
-        # action_spatial = action_vector_to_spatial(A1_normalized)
-
-        # Level 2 processing with state memory, action memory, and A1 through ReLU
+        # Level 2
         s2 = s
         A1_spatial_normalized = action_vector_to_spatial(A1_normalized, spatial_h=s2.size(2), spatial_w=s2.size(3), apply_relu=False)
 
@@ -823,7 +817,6 @@ class Hierarchial_memory_action_memrelu(nn.Module):
         s2_input = torch.cat([s2, mem_for_level2, A1_spatial_normalized], dim=1)  # 64 + 64 + num_outputs + num_outputs channels
         s2, _, _, _ = self.level2_encoder(s2_input)  # s2: (32+32)*4*4 = 64*4*4 = 1024
         s2_flat = s2.view(s2.size(0), -1)
-
         a2_logits = self.actor_linear2(s2_flat)
 
         V2 = self.critic_linear2(torch.cat([s2_flat, A2_normalized], dim=1))
@@ -834,16 +827,9 @@ class Hierarchial_memory_action_memrelu(nn.Module):
         a2_onehot = torch.zeros_like(a2_probs)
         a2_onehot.scatter_(1, a2_sample, 1.0)  # Create binary
 
-
         self.a2_prev = a2_onehot.detach()
 
-        # Create A2 for level 2 critic input - use normalized A2
-        # A2_for_critic = F.relu(A2_normalized)  # Shape: (batch, num_outputs) - use normalized A2
-
-        # Level 1 processing
-        # Flatten features for linear layers
         s_flat = x_conv.view(x_conv.size(0), -1)  # Shape: (batch, 1024)
-        # Use state memory + action spatial + A1 copies through ReLU for critic (state + state memory + action spatial + A1 vector + A2 vector)
         critic_input = torch.cat([
             s_flat,
             mem_for_critic.view(mem_for_critic.size(0), -1),
@@ -852,7 +838,7 @@ class Hierarchial_memory_action_memrelu(nn.Module):
 
         V1 = self.critic_linear(critic_input)
         # Actor uses state + a2_onehot + action memory vector (A1)
-        actor_input = torch.cat([s_flat, a2_onehot], dim=1)  # (batch, 1024 + 16 + num_outputs)
+        actor_input = torch.cat([s_flat, a2_onehot], dim=1)  # (batch, 1024 + 16
         a1 = self.actor_linear(actor_input)
 
         return V1, a1, hx, cx, None, None, V2, a2_logits
