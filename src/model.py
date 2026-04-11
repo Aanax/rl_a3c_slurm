@@ -813,6 +813,8 @@ class Hierarchial_memory_action_memrelu(nn.Module):
         s2 = s
         A1_spatial_normalized = action_vector_to_spatial(self.A1.clone(), spatial_h=s2.size(2), spatial_w=s2.size(3), apply_relu=False)
         A1_spatial_normalized = normalize_action_memory(A1_spatial_normalized)
+        A2_spatial_normalized = action_vector_to_spatial(self.A2.clone(), spatial_h=s2.size(2), spatial_w=s2.size(3), apply_relu=False)
+        A2_spatial_normalized = normalize_action_memory(A2_spatial_normalized)
 
         # Concatenate state, state memory, action spatial, and A1 spatial along channel dimension
         s2_input = torch.cat([s2, mem_for_level2, A1_spatial_normalized], dim=1)  # 64 + 64 + num_outputs + num_outputs channels
@@ -820,7 +822,7 @@ class Hierarchial_memory_action_memrelu(nn.Module):
         s2_flat = s2.view(s2.size(0), -1)
         a2_logits = self.actor_linear2(s2_flat)
 
-        V2 = self.critic_linear2(torch.cat([s2_flat, A2_normalized], dim=1))
+        V2 = self.critic_linear2(torch.cat([s2_flat, A2_spatial_normalized.view(A2_spatial_normalized.size(0),-1)], dim=1))
 
         # Sample from a2 probabilities to get one-hot binary vector
         a2_probs = F.softmax(a2_logits, dim=1)
@@ -834,7 +836,7 @@ class Hierarchial_memory_action_memrelu(nn.Module):
         critic_input = torch.cat([
             s_flat,
             mem_for_critic.view(mem_for_critic.size(0), -1),
-            A1_normalized.view(A1_normalized.size(0), -1),
+            A1_spatial_normalized.view(A1_spatial_normalized.size(0), -1),
         ], dim=1)  # (batch, 1024 + 1024 + num_outputs)
 
         V1 = self.critic_linear(critic_input)
