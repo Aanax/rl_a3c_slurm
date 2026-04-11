@@ -689,11 +689,11 @@ class Hierarchial_memory_action_memrelu(nn.Module):
         self.level2_encoder = EncoderRules234_2_mem_A1(num_outputs)
 
         # Level 2 heads ((32+32)*4*4 = 512 input)
-        self.critic_linear2 = nn.Linear((32+32)*4*4 + 16, 1)
+        self.critic_linear2 = nn.Linear((32+32)*4*4 + 16*4*4, 1)
         self.actor_linear2 = nn.Linear((32+32)*4*4, 16)
 
         # Level 1 heads (64*4*4 = 1024 input + 1024 memory)
-        self.critic_linear = nn.Linear(1024 + 1024 + num_outputs, 1)
+        self.critic_linear = nn.Linear(1024 + 1024 + num_outputs*4*4, 1)
         self.actor_linear = nn.Linear(64*4*4 + 16, num_outputs)
 
         # Initialize level 2 encoder
