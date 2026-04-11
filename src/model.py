@@ -802,7 +802,7 @@ class Hierarchial_memory_action_memrelu(nn.Module):
 
         # Normalize A1 and A2 using L2 normalization with scaling
         # Formula: (A/norm_L2(A)) * sqrt(dim(A)) where dim(A) is full feature map dimension
-        A1_normalized = normalize_action_memory(self.A1.clone(), spatial_h=s2.size(2), spatial_w=s2.size(3))
+        A1_normalized = normalize_action_memory(self.A1.clone())
         A2_normalized = normalize_action_memory(self.A2.clone())
 
         # Create copies of state memory and action memory through ReLU
@@ -811,7 +811,8 @@ class Hierarchial_memory_action_memrelu(nn.Module):
 
         # Level 2
         s2 = s
-        A1_spatial_normalized = action_vector_to_spatial(A1_normalized, spatial_h=s2.size(2), spatial_w=s2.size(3), apply_relu=False)
+        A1_spatial_normalized = action_vector_to_spatial(self.A1.clone(), spatial_h=s2.size(2), spatial_w=s2.size(3), apply_relu=False)
+        A1_spatial_normalized = normalize_action_memory(A1_spatial_normalized)
 
         # Concatenate state, state memory, action spatial, and A1 spatial along channel dimension
         s2_input = torch.cat([s2, mem_for_level2, A1_spatial_normalized], dim=1)  # 64 + 64 + num_outputs + num_outputs channels
