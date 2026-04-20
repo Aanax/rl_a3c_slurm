@@ -185,9 +185,16 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             model_output = None
             if not player.done:
                 state = player.state
-                model_output = player.model(
-                    state.unsqueeze(0), player.hx, player.cx, None, player.action_prev
-                )
+
+                if hasattr(args, 'model_type') and args.model_type == 'Hierarchial_memory_action_memrelu':
+                    model_output = player.model(
+                        state.unsqueeze(0), player.hx, player.cx, None, player.action_prev
+                    )
+                else:
+                    model_output = player.model(
+                        state.unsqueeze(0), player.hx, player.cx, None
+                    )
+
                 value = model_output[0]
                 R = value.detach()
                 # For hierarchical models, also get V2
