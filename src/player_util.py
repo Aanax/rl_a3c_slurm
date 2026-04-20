@@ -39,10 +39,16 @@ class Agent(object):
         if hasattr(self.args, 'model_type') and self.args.model_type == 'Hierarchial_memory_action_memrelu':
             action_prev = self.action_prev
 
-        current_state = self.state.unsqueeze(0)
-        model_output = self.model(
-            current_state, self.hx, self.cx, None, action_prev
-        )
+            current_state = self.state.unsqueeze(0)
+            model_output = self.model(
+                current_state, self.hx, self.cx, None, action_prev
+            )
+        else:
+            current_state = self.state.unsqueeze(0)
+            model_output = self.model(
+                    current_state, self.hx, self.cx, None
+                )
+
         if len(model_output) == 4:
             value, logit, self.hx, self.cx = model_output
             x_restored = None
@@ -150,9 +156,14 @@ class Agent(object):
             if hasattr(self.args, 'model_type') and self.args.model_type == 'Hierarchial_memory_action_memrelu':
                 action_prev = self.action_prev
             
-            model_output = self.model(
-                self.state.unsqueeze(0), self.hx, self.cx, None, action_prev
+                model_output = self.model(
+                    self.state.unsqueeze(0), self.hx, self.cx, None, action_prev
+                )
+            else:
+                model_output = self.model(
+                self.state.unsqueeze(0), self.hx, self.cx, None
             )
+
             if len(model_output) >= 4:
                 # For hierarchical models (8 elements), use first 4: V1, a1, hx, cx
                 # For non-hierarchical models (4-6 elements), use all available
