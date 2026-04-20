@@ -652,6 +652,110 @@ class Hierarchial_memory_memrelu(nn.Module):
 
         return V1, a1, hx, cx, None, None, V2, a2_logits
 
+class Hierarchial_memory_memrelu_no_a2(nn.Module):
+    """
+    Same as Hierarchial_memory but makes copies of memory before passing to critic and 2nd level,
+    and passes these copies through ReLU activation.
+    """
+    def __init__(self, num_inputs, action_space, args):
+        super(Hierarchial_memory_memrelu_no_a2, self).__init__()
+        self.hidden_size = args.hidden_size
+        self.gamma1 = args.gamma
+        self.num_outputs = action_space.n
+        self.monitor_s = getattr(args, 'monitor_s', False)
+        if self.monitor_s:
+            self.s_values = []
+
+        num_outputs = action_space.n
+
+        # Level 1 encoder (same as A3CRules2378)
+        use_rmsnorm = getattr(args, 'use_rmsnorm', False)
+        self.level1_encoder = EncoderRules234(num_inputs, latent_dim_conv=64, use_rmsnorm=use_rmsnorm)
+
+        # Level 2 encoder (64*4*4 input)
+        self.level2_encoder = EncoderRules234_2_mem()
+
+        # Level 2 heads ((32+32)*4*4 = 512 input)
+        self.critic_linear2 = nn.Linear((32+32)*4*4, 1)
+        self.actor_linear2 = nn.Linear((32+32)*4*4, 16)
+
+        # Level 1 heads (64*4*4 = 1024 input + 1024 memory)
+        self.critic_linear = nn.Linear(1024 + 1024, 1)
+        self.actor_linear = nn.Linear(64*4*4, num_outputs)
+
+        # Initialize level 2 heads
+        for linear in [self.critic_linear2, self.actor_linear2]:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
+            std = 1.0 / math.sqrt(fan_in)
+            nn.init.normal_(linear.weight, mean=0.0, std=std)
+            linear.bias.data.fill_(0)
+
+        # Initialize level 1 heads
+        for linear in [self.critic_linear, self.actor_linear]:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
+            std = 1.0 / math.sqrt(fan_in)
+            nn.init.normal_(linear.weight, mean=0.0, std=std)
+            linear.bias.data.fill_(0)
+
+        self.actor_linear.weight.data.mul_(0.01)
+        self.critic_linear.weight.data.mul_(1.0)
+
+        # Internal memory for running differences on features (level1 only)
+        self.running_mem = torch.zeros((1,64,4,4))
+        self.prev_x_conv = torch.zeros((1,64,4,4))
+
+        self.train()
+
+    def forward(self, inputs, hx, cx, mem=None):
+        # Level 1 encoding
+        s, _, _, _ = self.level1_encoder(inputs)  # s: 64*4*4
+
+        if self.monitor_s:
+            self.s_values.append(s.detach().cpu())
+
+        hx = torch.Tensor([0])
+        cx = torch.Tensor([0])
+
+        x_conv = s  # Keep as 4D tensor (64,4,4)
+
+        # Compute running mem (level1 only)
+        if self.running_mem is None:
+            self.running_mem = torch.zeros_like(x_conv)
+        if self.prev_x_conv is not None:
+            diff = (x_conv - self.prev_x_conv).detach()
+            self.running_mem = (diff + self.gamma1 * self.running_mem).detach()
+
+        self.prev_x_conv = x_conv.detach()
+
+        # Create copies of memory and pass through ReLU
+        mem_for_level2 = F.relu(self.running_mem.clone())
+        mem_for_critic = F.relu(self.running_mem.clone())
+
+        # Level 2 processing with memory copy through ReLU
+        s2 = s
+        s2_input = torch.cat([s2, mem_for_level2], dim=1)  # 64 + 64 at input
+        s2, _, _, _ = self.level2_encoder(s2_input)  # s2: (32+32)*4*4 = 64*4*4
+        s2_flat = s2.view(s2.size(0), -1)
+        a2_logits = self.actor_linear2(s2_flat)
+        V2 = self.critic_linear2(s2_flat)
+
+        # Sample from a2 probabilities to get one-hot binary vector
+        a2_probs = F.softmax(a2_logits, dim=1)
+        a2_sample = a2_probs.multinomial(1)  # Sample
+        a2_onehot = torch.zeros_like(a2_probs)
+        a2_onehot.scatter_(1, a2_sample, 1.0)  # Create binary
+
+        # Level 1 processing
+        # Flatten features for linear layers
+        s_flat = x_conv.view(x_conv.size(0), -1)
+        # Use memory copy through ReLU for critic
+        critic_input = torch.cat([s_flat, mem_for_critic.view(mem_for_critic.size(0), -1)], dim=1)
+        V1 = self.critic_linear(critic_input)
+        actor_input = torch.cat([s_flat], dim=1)
+        a1 = self.actor_linear(actor_input)
+
+        return V1, a1, hx, cx, None, None, V2, a2_logits
+
 class Hierarchial_memory_action_memrelu(nn.Module):
     """
     Same as Hierarchial_memory_memrelu but with action memory added.
@@ -737,24 +841,6 @@ class Hierarchial_memory_action_memrelu(nn.Module):
     def forward(self, inputs, hx, cx, mem=None, action_prev=None):
         """
         Forward pass with action memory.
-
-        Args:
-            inputs: Input tensor (batch_size, num_inputs, H, W)
-            hx: Hidden state (not used, reset to zero)
-            cx: Cell state (not used, reset to zero)
-            mem: Previous state memory (optional)
-            action_prev: Previous action a_t-1 as a vector of size num_outputs
-                        If None, uses zeros.
-        
-        Returns:
-            V1: Level 1 value estimate (batch_size, 1)
-            a1: Level 1 action logits (batch_size, num_outputs)
-            hx: Hidden state (zeros)
-            cx: Cell state (zeros)
-            mem: Updated state memory (spatial)
-            mem_action: Updated action memory (vector of size num_outputs)
-            V2: Level 2 value estimate (batch_size, 1)
-            a2_logits: Level 2 action logits (batch_size, 16)
         """
         if action_prev is not None:
             a1_prev = action_prev  # Shape: (batch_size, num_outputs)
@@ -802,8 +888,8 @@ class Hierarchial_memory_action_memrelu(nn.Module):
 
         # Normalize A1 and A2 using L2 normalization with scaling
         # Formula: (A/norm_L2(A)) * sqrt(dim(A)) where dim(A) is full feature map dimension
-        A1_normalized = normalize_action_memory(self.A1.clone())
-        A2_normalized = normalize_action_memory(self.A2.clone())
+        # A1_normalized = normalize_action_memory(self.A1.clone())
+        # A2_normalized = normalize_action_memory(self.A2.clone())
 
         # Create copies of state memory and action memory through ReLU
         mem_for_level2 = F.relu(self.running_mem.clone())
