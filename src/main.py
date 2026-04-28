@@ -60,6 +60,7 @@ args.w_restoration_loss = config.getfloat('DEFAULT', 'w_restoration_loss', fallb
 args.monitor_losses = config.getboolean('DEFAULT', 'monitor_losses', fallback=False)
 args.save_model_steps = config.getint('DEFAULT', 'save_model_steps', fallback=0)
 args.train_version = config.get('DEFAULT', 'train_version', fallback='v1')
+args.separate_actor_deltas = config.getboolean('DEFAULT', 'separate_actor_deltas', fallback=False)
 
 # For list types
 gpu_ids_str = config.get('DEFAULT', 'gpu_ids', fallback='-1')

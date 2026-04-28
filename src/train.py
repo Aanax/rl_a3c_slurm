@@ -264,8 +264,10 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                         )
                         value_loss2 = value_loss2 + value_loss2_i
 
-                # For actor1, use sum of delta_t and delta_t2 (if hierarchical)
-                if delta_t2 is not None:
+                # For actor1: use only delta_t when separate_actor_deltas=True,
+                # otherwise combine delta_t + delta_t2 (original behaviour).
+                separate_deltas = getattr(args, 'separate_actor_deltas', False)
+                if delta_t2 is not None and not separate_deltas:
                     gae = gae * args.gamma * args.tau + (delta_t + delta_t2)
                 else:
                     gae = gae * args.gamma * args.tau + delta_t
