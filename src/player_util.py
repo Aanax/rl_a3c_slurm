@@ -25,6 +25,7 @@ class Agent(object):
         self.x_restoreds = []
         self.kls = []
         self.states = []
+        self.a1_logits = []  # Store a1 logits for Hierarchial_SameShape model
         self.done = True
         self.info = None
         self.reward = 0
@@ -69,8 +70,15 @@ class Agent(object):
             value, logit, self.hx, self.cx, _, _, value2, logit2 = model_output
             x_restored = None
             kl = None
+            a1_logits = None
+        elif len(model_output) == 9:
+            # Hierarchial_SameShape model: V1, combined_logits, hx, cx, mem, mem_action, V2, a2_logits, a1_logits
+            value, logit, self.hx, self.cx, _, _, value2, logit2, a1_logits = model_output
+            x_restored = None
+            kl = None
+            self.a1_logits.append(a1_logits)
         else:
-            raise ValueError(f"Unexpected model output length: {len(model_output)}. Expected 4, 5, 6, or 8.")
+            raise ValueError(f"Unexpected model output length: {len(model_output)}. Expected 4, 5, 6, 8, or 9.")
         
         prob = F.softmax(logit, dim=1)
         log_prob = F.log_softmax(logit, dim=1)
@@ -201,4 +209,5 @@ class Agent(object):
         self.x_restoreds = []
         self.kls = []
         self.states = []
+        self.a1_logits = []
         return self

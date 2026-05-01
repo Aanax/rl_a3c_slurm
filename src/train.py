@@ -41,6 +41,59 @@ def compute_level2_loss_v1(args, player, i, gae2, R2):
     return advantage2, value_loss2_i, delta_t2, gae2, R2
 
 
+def compute_level2_loss_same_shape(args, player, i, gae2, R2):
+    """
+    New loss for Hierarchial_SameShape model.
+    
+    Loss_a2 = -Summ(g1^k * logit(a1_t+k)) * Summ(delta_l)
+    
+    Where:
+    - First sum is over future timesteps (k = 0, 1, 2, ...) weighted by gamma1^k
+    - Second sum is over levels (delta1, delta2, ...)
+    
+    For the SameShape model, we use:
+    - a1_logits: logits from level 1 actor
+    - delta_t: TD error for level 1
+    - delta_t2: TD error for level 2
+    """
+    # Compute Summ(g1^k * logit(a1_t+k)) for future timesteps
+    # This is a discounted sum of future a1 logits
+    gamma1 = args.gamma
+    future_a1_sum = torch.zeros_like(player.a1_logits[i])
+    
+    # Sum over future timesteps with gamma decay
+    for k in range(i, len(player.a1_logits)):
+        future_a1_sum = future_a1_sum + (gamma1 ** (k - i)) * player.a1_logits[k].detach()
+    
+    # Compute Summ(delta_l) = delta1 + delta2 (sum over levels)
+    # delta_t is already computed for level 1
+    delta_t = (
+        player.rewards[i]
+        + args.gamma * player.values[i + 1].data
+        - player.values[i].data
+    )
+    
+    # Compute delta_t2 for level 2
+    r2_i = player.values[i].detach() * (1 - args.gamma)
+    delta_t2 = (
+        r2_i
+        + args.gamma2 * player.values2[i + 1].data
+        - player.values2[i].data
+    )
+    
+    # Sum of deltas across levels
+    delta_sum = delta_t + delta_t2
+    
+    # Loss_a2 = -Summ(g1^k * logit(a1_t+k)) * Summ(delta_l)
+    # We take the mean over the action dimension for the logits sum
+    policy_loss2_i = -(future_a1_sum.mean(dim=1, keepdim=True)) * delta_sum
+    
+    # Update GAE for level 2
+    gae2 = gae2 * args.gamma2 * args.tau + delta_t2
+    
+    return policy_loss2_i, delta_t2, gae2, R2
+
+
 def compute_level2_loss_v2(args, player, i, r2, V2Target, gae2):
     """
     v2: new algo for level 2 loss.
@@ -218,6 +271,10 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             train_version = getattr(args, 'train_version', 'v1')
             use_train_v2 = (train_version == 'v2')
             
+            # Check if we're using the SameShape model with its special loss
+            is_same_shape = hasattr(args, 'model_type') and args.model_type == 'Hierarchial_SameShape'
+            use_same_shape_loss = is_same_shape and len(player.a1_logits) > 0
+            
             # trainv2: init r2 and V2Target at the start of the batch
             if is_hierarchical and use_train_v2:
                 # r2 = (1-g1)*V1[H].detach() - w last value (botstrap)
@@ -240,7 +297,18 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 # Level 2 loss
                 delta_t2 = None
                 if is_hierarchical and len(player.values2) > i and len(player.log_probs2) > i:
-                    if use_train_v2:
+                    if use_same_shape_loss and len(player.a1_logits) > i:
+                        # Use special SameShape loss: Loss_a2 = -Summ(g1^k * logit(a1_t+k)) * Summ(delta_l)
+                        (
+                            policy_loss2_i,
+                            delta_t2,
+                            gae2,
+                            R2
+                        ) = compute_level2_loss_same_shape(
+                            args, player, i, gae2, R2
+                        )
+                        policy_loss2 = policy_loss2 + policy_loss2_i
+                    elif use_train_v2:
                         (
                             advantage2,
                             value_loss2_i,
