@@ -1067,7 +1067,7 @@ class Hierarchial_SameShape(nn.Module):
 
         # Level 1 heads (64*4*4 = 1024 input + 1024 memory)
         self.critic_linear = nn.Linear(1024 + 1024, 1)
-        self.actor_linear = nn.Linear(64*4*4 + 16, num_outputs)
+        self.actor_linear = nn.Linear(64*4*4, num_outputs)
 
         # Initialize level 2 heads
         for linear in [self.critic_linear2, self.actor_linear2]:
