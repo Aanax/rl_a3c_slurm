@@ -931,3 +931,79 @@ class Hierarchial_memory_action_memrelu(nn.Module):
         a1 = self.actor_linear(actor_input)
 
         return V1, a1, hx, cx, None, None, V2, a2_logits
+
+class Hierarchial_a2a1_connect(nn.Module):
+    def __init__(self, num_inputs, action_space, args):
+        super(Hierarchial_a2a1_connect, self).__init__()
+        self.hidden_size = args.hidden_size
+        self.monitor_s = getattr(args, 'monitor_s', False)
+        if self.monitor_s:
+            self.s_values = []
+
+        num_outputs = action_space.n
+
+        # Level 1 encoder (same as A3CRules2378)
+        use_rmsnorm = getattr(args, 'use_rmsnorm', False)
+        self.level1_encoder = EncoderRules234(num_inputs, latent_dim_conv=64, use_rmsnorm=use_rmsnorm)
+
+        # Level 2 encoder (64*4*4 input)
+        self.level2_encoder = EncoderRules234_2()
+
+        # Level 2 heads (32*4*4 = 512 input)
+        self.critic_linear2 = nn.Linear(32*4*4, 1)
+        self.actor_linear2 = nn.Linear(32*4*4, num_outputs)
+
+        # Level 1 heads (64*4*4 = 1024 input, concat with a2)
+        self.critic_linear = nn.Linear(64*4*4, 1)
+        self.actor_linear = nn.Linear(64*4*4 + num_outputs, num_outputs)
+
+        # Initialize level 2 heads
+        for linear in [self.critic_linear2, self.actor_linear2]:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
+            std = 1.0 / math.sqrt(fan_in)
+            nn.init.normal_(linear.weight, mean=0.0, std=std)
+            linear.bias.data.fill_(0)
+
+        # Initialize level 1 heads
+        for linear in [self.critic_linear, self.actor_linear]:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
+            std = 1.0 / math.sqrt(fan_in)
+            nn.init.normal_(linear.weight, mean=0.0, std=std)
+            linear.bias.data.fill_(0)
+
+        self.actor_linear.weight.data.mul_(0.01)
+        self.critic_linear.weight.data.mul_(1.0)
+
+        self.train()
+
+    def forward(self, inputs, hx, cx, mem=None):
+        # Level 1 encoding
+        s, _, _, _ = self.level1_encoder(inputs)  # s: 64*4*4
+
+        if self.monitor_s:
+            self.s_values.append(s.detach().cpu())
+
+        hx = torch.Tensor([0])
+        cx = torch.Tensor([0])
+
+        # Level 2 processing
+        s2 = s #F.relu(s)
+        s2, _, _, _ = self.level2_encoder(s2)  # s2: 32*4*4
+        s2_flat = s2.view(s2.size(0), -1)
+        a2_logits = self.actor_linear2(s2_flat)
+        V2 = self.critic_linear2(s2_flat)
+
+        # Sample from a2 probabilities to get one-hot binary vector
+        a2_probs = F.softmax(a2_logits, dim=1)
+        a2_sample = a2_probs.multinomial(1)  # Sample
+        a2_onehot = torch.zeros_like(a2_probs)
+        a2_onehot.scatter_(1, a2_sample, 1.0)  # Create binary
+
+        # Level 1 processing
+        s_flat = s.view(s.size(0), -1)
+        s_flat = F.relu(s_flat)
+        actor_input = torch.cat([s_flat, a2_onehot], dim=1)
+        a1 = self.actor_linear(actor_input)
+        V1 = self.critic_linear(s_flat)
+
+        return V1, a1, hx, cx, None, None, V2, a2_logits

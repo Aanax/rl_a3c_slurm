@@ -3,6 +3,7 @@ import os
 os.environ["OMP_NUM_THREADS"] = "1"
 from setproctitle import setproctitle as ptitle
 import torch
+import torch.nn.functional as F
 import torch.optim as optim
 from environment import atari_env
 from utils import ensure_shared_grads
@@ -39,6 +40,35 @@ def compute_level2_loss_v1(args, player, i, gae2, R2):
     gae2 = gae2 * args.gamma2 * args.tau + delta_t2
     
     return advantage2, value_loss2_i, delta_t2, gae2, R2
+
+
+def compute_level2_loss_a2a1_connect(args, player, i, gae2, R2, logprobs_summ):
+    """
+    v1: orig algo for level 2 loss.
+    
+    r2_i = V1_i * (1 - gamma1)
+    R2 = gamma2 * R2 + r2_i
+    advantage2 = R2 - V2[i]
+    """
+    # r2_i = V1_i (r for critic2 is V1)
+    r2_i = player.values[i].detach() * (1 - args.gamma)
+    R2 = args.gamma2 * R2 + r2_i
+    advantage2 = R2 - player.values2[i]
+    value_loss2_i = 0.5 * advantage2.pow(2)
+
+
+    logprobs_summ = logprobs_summ*args.gamma1 + player.log_probs1[i]*(1-args.gamma1)
+    
+    # Generalized Advantage Estimation for level 2
+    delta_t2 = (
+        r2_i
+        + args.gamma2 * player.values2[i + 1].data
+        - player.values2[i].data
+    )
+    
+    gae2 = gae2 * args.gamma2 * args.tau + delta_t2
+    
+    return advantage2, value_loss2_i, delta_t2, gae2, R2, logprobs_summ
 
 
 def compute_level2_loss_v2(args, player, i, r2, V2Target, gae2):
@@ -177,11 +207,16 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     gae = torch.zeros(1, 1).cuda()
                     R2 = torch.zeros(1, 1).cuda()
                     gae2 = torch.zeros(1, 1).cuda()
+                    last_log_prob2 = torch.zeros(1, 1).cuda()
+
             else:
                 R = torch.zeros(1, 1)
                 gae = torch.zeros(1, 1)
                 R2 = torch.zeros(1, 1)
                 gae2 = torch.zeros(1, 1)
+                last_log_prob2 = torch.zeros(1, 1)
+                
+                
             model_output = None
             if not player.done:
                 state = player.state
@@ -201,7 +236,14 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 if len(model_output) >= 8:
                     value2 = model_output[6]
                     R2 = value2.detach()
+                    logit2 = model_output[7]
+                    prob2 = F.softmax(logit2, dim=1)
+                    last_log_prob2 = F.log_softmax(logit2, dim=1)
+                    action2 = prob2.multinomial(1).data # note: may sample differently in reality
+                    last_log_prob2 = last_log_prob2.gather(1, action2).detach()
+
             player.values.append(R)
+            
             # Check if model is hierarchical (has V2 and a2 outputs)
             # If values2 was populated during action_train, model is hierarchical
             is_hierarchical = len(player.values2) > 0
@@ -209,10 +251,14 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 # Append final R2 to match the final R we just appended
                 # If episode is done, R2 remains zeros (bootstrap value)
                 player.values2.append(R2)
+            if args.use_train_a2a1_connect:
+                player.log_probs2.append(last_log_prob2)
+
             policy_loss = 0
             value_loss = 0
             policy_loss2 = 0
             value_loss2 = 0
+            logprobs_summ = player.log_probs2[-1]
             
             # Determine which train version to use for level 2 calculations
             train_version = getattr(args, 'train_version', 'v1')
@@ -240,7 +286,20 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 # Level 2 loss
                 delta_t2 = None
                 if is_hierarchical and len(player.values2) > i and len(player.log_probs2) > i:
-                    if use_train_v2:
+                    if args.use_train_a2a1_connect:
+                        (
+                            advantage2,
+                            value_loss2_i,
+                            delta_t2,
+                            gae2,
+                            R2,
+                            logprobs_summ
+                        ) = compute_level2_loss_a2a1_connect(
+                            args, player, i, gae2, R2, logprobs_summ
+                        )
+                        value_loss2 = value_loss2 + value_loss2_i
+
+                    elif use_train_v2:
                         (
                             advantage2,
                             value_loss2_i,
@@ -279,12 +338,18 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 )
                 
                 # Actor2 loss (only for hierarchical)
-                if is_hierarchical and len(player.log_probs2) > i:
+                if args.use_train_a2a1_connect:
+                    policy_loss2 = (
+                        policy_loss2
+                        + 0.5*((player.log_probs2[i] - logprobs_summ)**2) * gae
+                    )
+                elif is_hierarchical and len(player.log_probs2) > i:
                     policy_loss2 = (
                         policy_loss2
                         - (player.log_probs2[i] * gae2)
                         - (args.entropy_coef * player.entropies2[i])
                     )
+                
 
             # Additional losses for VAE models (only compute if weights > 0)
             kld_loss = 0
