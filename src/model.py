@@ -1095,10 +1095,8 @@ class Hierarchial_SameShape(nn.Module):
     def forward(self, inputs, hx, cx, mem=None):
         # Level 1 encoding
         s, _, _, _ = self.level1_encoder(inputs)  # s: 64*4*4
-
         if self.monitor_s:
             self.s_values.append(s.detach().cpu())
-
         hx = torch.Tensor([0])
         cx = torch.Tensor([0])
 
@@ -1110,7 +1108,6 @@ class Hierarchial_SameShape(nn.Module):
         if self.prev_x_conv is not None:
             diff = (x_conv - self.prev_x_conv).detach()
             self.running_mem = (diff + self.gamma1 * self.running_mem).detach()
-
         self.prev_x_conv = x_conv.detach()
 
         # Create copies of memory and pass through ReLU

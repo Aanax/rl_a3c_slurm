@@ -40,6 +40,29 @@ def compute_level2_loss_v1(args, player, i, gae2, R2):
     
     return advantage2, value_loss2_i, delta_t2, gae2, R2
 
+# def compute_level2_loss_same_shape_fix(args, player, i, gae2, R2):
+#     """
+#     same value part
+
+#     """
+
+#     # r2_i = V1_i (r for critic2 is V1)
+#     r2_i = player.values[i].detach() * (1 - args.gamma)
+#     R2 = args.gamma2 * R2 + r2_i
+#     advantage2 = R2 - player.values2[i]
+#     value_loss2_i = 0.5 * advantage2.pow(2)
+    
+#     # Generalized Advantage Estimation for level 2
+#     delta_t2 = (
+#         r2_i
+#         + args.gamma2 * player.values2[i + 1].data
+#         - player.values2[i].data
+#     )
+
+    
+
+
+
 
 def compute_level2_loss_same_shape(args, player, i, gae2, R2):
     """
@@ -266,6 +289,8 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             value_loss = 0
             policy_loss2 = 0
             value_loss2 = 0
+            alignment_loss2 = 0
+            actions_summ = torch.zeros_like(player.a1_logits[0])
             
             # Determine which train version to use for level 2 calculations
             train_version = getattr(args, 'train_version', 'v1')
@@ -281,6 +306,20 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 r2 = (1 - args.gamma) * player.values[-1].detach()
                 # V2Target = V2[H].detach() - use the last value2 (bootstrap)
                 V2Target = player.values2[-1].detach()
+
+
+            # Андрей, я провел теор. анализ, все оказалось проще. 
+            # 1) Лоссы акторов обоих уровней модулируем суммой (delta1 + delta2) (у вас это обозначено gae). 
+            # 2) Связь а2 с а1 оставляем, как и было, через линейный FC, при этом а2 сэмплируется, и далее связь к логитам а1 через one hot переменную (в общем, как и было у нас). 
+            # 3) Меняется только лосс а2. В ваших терминах action_summ в конце каждого батча T инициализируем a2_logits[T], потом считаем таргет, как у вас в 332, только перед a1_logits.detach ещё множитель (1-gamma1). 
+            # А затем считаем loss_a2+ = 0.5*(a2_logits[i] - action_summ)^2*(delta1+delta2).detach. Градиенты здесь идут через логит, действие от которого было сэмплировано.
+
+
+            # отя, Андрей, а что нас смущает всё-таки сразу логпробы а1 усреднять, а не логиты?
+            #  Не вижу сложности заменить логиты а1 на логпробы в лоссе для а2:
+            #  loss_a2+ = 0.5*(logprobs_a2[i] - logprobs_summ)^2*(delta1+delta2). 
+            #  2 замечания:1) в качестве "затычки" используем logprobs_a2[T] в конце батча, рассчитанное на сэмплированном в момент T действии а2 (его же можно передавать между батчами, чтобы все было корректно); 
+            #  2) если таргет logprobs_summ окажется больше 0, то просто клипим его нулем (так как logprob лежит в диапазоне от -inf до 0). Давайте сразу корректно сделаем
             
             for i in reversed(range(len(player.rewards))):
                 R = args.gamma * R + player.rewards[i]
@@ -293,78 +332,45 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     + args.gamma * player.values[i + 1].data
                     - player.values[i].data
                 )
-
                 # Level 2 loss
                 delta_t2 = None
-                if is_hierarchical and len(player.values2) > i and len(player.log_probs2) > i:
-                    if use_same_shape_loss and len(player.a1_logits) > i:
-                        # Use special SameShape loss: Loss_a2 = -Summ(g1^k * logit(a1_t+k)) * Summ(delta_l)
-                        (
-                            policy_loss2_i,
-                            delta_t2,
-                            gae2,
-                            R2
-                        ) = compute_level2_loss_same_shape(
-                            args, player, i, gae2, R2
-                        )
-                        policy_loss2 = policy_loss2 + policy_loss2_i
-                    elif use_train_v2:
-                        (
-                            advantage2,
-                            value_loss2_i,
-                            delta_t2,
-                            gae2,
-                            r2,
-                            V2Target
-                        ) = compute_level2_loss_v2(
-                            args, player, i, r2, V2Target, gae2
-                        )
-                        value_loss2 = value_loss2 + value_loss2_i
-                    else:
-                        (
-                            advantage2,
-                            value_loss2_i,
-                            delta_t2,
-                            gae2,
-                            R2
-                        ) = compute_level2_loss_v1(
-                            args, player, i, gae2, R2
-                        )
-                        value_loss2 = value_loss2 + value_loss2_i
 
-                # For actor1: use only delta_t when separate_actor_deltas=True,
-                # otherwise combine delta_t + delta_t2 (original behaviour).
-                separate_deltas = getattr(args, 'separate_actor_deltas', False)
-                if delta_t2 is not None and not separate_deltas:
-                    gae = gae * args.gamma * args.tau + (delta_t + delta_t2)
-                else:
-                    gae = gae * args.gamma * args.tau + delta_t
+                # r2_i = V1_i (r for critic2 is V1)
+                r2_i = player.values[i].detach() * (1 - args.gamma)
+                R2 = args.gamma2 * R2 + r2_i
+                advantage2 = R2 - player.values2[i]
+                value_loss2_i = 0.5 * advantage2.pow(2)
+                value_loss2 = value_loss2 + value_loss2_i
+
+                ## actions summ
+                actions_summ = actions_summ*args.gamma1 + player.a1_logits[i].detach()
+                
+                # Generalized Advantage Estimation for level 2
+                delta_t2 = (
+                    r2_i
+                    + args.gamma2 * player.values2[i + 1].data - player.values2[i].data
+                )
+.
+                gae = gae * args.gamma * args.tau + (delta_t + delta_t2)
+                gae2 = gae2 * args.gamma2 * args.tau + delta_t2
                     
                 policy_loss = (
                     policy_loss
-                    - (player.log_probs[i] * gae)
-                    - (args.entropy_coef * player.entropies[i])
+                    - (player.log_probs[i] * gae) - (args.entropy_coef * player.entropies[i])
                 )
                 
                 # Actor2 loss (only for hierarchical)
                 if is_hierarchical and len(player.log_probs2) > i:
                     policy_loss2 = (
                         policy_loss2
-                        - (player.log_probs2[i] * gae2)
+                        - ((player.a2_logits[i]-actions_summ).mean(dim=1, keepdim=True) * gae2)
                         - (args.entropy_coef * player.entropies2[i])
                     )
 
             # Additional losses for VAE models (only compute if weights > 0)
             kld_loss = 0
             restoration_loss = 0
-            if args.w_kld_loss > 0 or args.w_restoration_loss > 0:
-                batch_size = len(player.rewards)
-                for i in range(len(player.rewards)):
-                    if args.w_kld_loss > 0 and len(player.kls) > i:
-                        kld_loss += args.w_kld_loss * player.kls[i]
-                    if args.w_restoration_loss > 0 and len(player.x_restoreds) > i:
-                        restoration_loss += args.w_restoration_loss * (player.x_restoreds[i] - player.states[i].detach()).pow(2).mean()
-
+            
             # Combine critic1 loss with critic2 loss
             if is_hierarchical:
                 value_loss = value_loss + value_loss2

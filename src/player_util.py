@@ -26,6 +26,7 @@ class Agent(object):
         self.kls = []
         self.states = []
         self.a1_logits = []  # Store a1 logits for Hierarchial_SameShape model
+        self.a2_logits = []
         self.done = True
         self.info = None
         self.reward = 0
@@ -77,6 +78,7 @@ class Agent(object):
             x_restored = None
             kl = None
             self.a1_logits.append(a1_logits)
+            self.a2_logits.append(logit2)
         else:
             raise ValueError(f"Unexpected model output length: {len(model_output)}. Expected 4, 5, 6, 8, or 9.")
         
