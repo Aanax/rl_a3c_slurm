@@ -57,7 +57,7 @@ def compute_level2_loss_a2a1_connect(args, player, i, gae2, R2, logprobs_summ):
     value_loss2_i = 0.5 * advantage2.pow(2)
 
 
-    logprobs_summ = logprobs_summ*args.gamma1 + player.log_probs1[i]*(1-args.gamma1)
+    logprobs_summ = logprobs_summ*args.gamma + player.log_probs2[i]*(1-args.gamma)
     
     # Generalized Advantage Estimation for level 2
     delta_t2 = (
