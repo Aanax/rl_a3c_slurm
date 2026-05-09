@@ -77,6 +77,8 @@ def parse_args():
                    help='Render gameplay (default: False)')
     p.add_argument('--render-freq', type=int, default=1,
                    help='Frequency to render (default: 1)')
+    p.add_argument('--zero-a2', action='store_true',
+                   help='Append _zeroing suffix to model_type (zeros a2 input to actor)')
     
     cli = p.parse_args()
 
@@ -114,6 +116,7 @@ def parse_args():
     args.render = cli.render
     args.render_freq = cli.render_freq
     args.gpu_id = cli.gpu_id
+    args.zero_a2 = cli.zero_a2
 
     return args
 
@@ -130,6 +133,10 @@ def load_model_and_env(args):
 
     num_inputs = env.observation_space.shape[0]
 
+    # If --zero-a2 is specified, append '_zeroing' suffix to model type
+    if getattr(args, 'zero_a2', False):
+        args.model_type = args.model_type + '_zeroing'
+    
     model_cls = getattr(model_module, args.model_type)
     net = model_cls(num_inputs, env.action_space, args)
     

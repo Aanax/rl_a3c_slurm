@@ -16,6 +16,11 @@
 #   $2  path to .dat/.pth checkpoint  (e.g. trained_models/PongNoFrameskip-v4.dat)
 #   $3+ additional arguments for eval.py (e.g. --num-episodes 3 --gpu-id 0)
 #
+# Examples:
+#   sbatch slurm_scripts/run_eval.sh configs/run_config_our.ini trained_models/model.dat --num-episodes 3
+#   sbatch slurm_scripts/run_eval.sh configs/run_config_our.ini trained_models/model.dat --zero-a2 --num-episodes 1
+#   sbatch slurm_scripts/run_eval.sh configs/run_config_our6.ini trained_models/Hierarchial_a2a1_connect_32w_g_09_g2_099_15.dat --zero-a2 --num-episodes 1
+#
 # Output:
 #   Evaluation artifacts in logs/{experiment_name}/Eval_{timestamp}_{model_name}/
 #   SLURM stdout/stderr in logs/%j.out / logs/%j.err
