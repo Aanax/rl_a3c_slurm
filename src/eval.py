@@ -281,12 +281,14 @@ def save_eval_results(all_episodes_data, args):
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H:%M:%S')
         model_name = os.path.basename(args.model_path).split('.')[0]
         
+        zeroing_suffix = "_zeroing" if getattr(args, 'zero_a2', False) else ""
+        
         if args.on_cluster:
             # On cluster: save to logs/experiment_name/Eval_.../
             exp_name = getattr(args, 'experiment_name', 'eval')
-            args.output_dir = f"logs/{exp_name}/Eval_{timestamp}_{model_name}/"
+            args.output_dir = f"logs/{exp_name}/Eval_{timestamp}_{model_name}{zeroing_suffix}/"
         else:
-            args.output_dir = f"./Eval_{timestamp}_{model_name}/"
+            args.output_dir = f"./Eval_{timestamp}_{model_name}{zeroing_suffix}/"
     
     os.makedirs(args.output_dir, exist_ok=True)
     print(f"\n[eval] Saving results to: {args.output_dir}")
