@@ -1083,3 +1083,85 @@ class Hierarchial_a2a1_connect_zeroing(nn.Module):
         V1 = self.critic_linear(s_flat)
 
         return V1, a1, hx, cx, None, None, V2, a2_logits
+
+class Hierarchial_interactor(nn.Module):
+    def __init__(self, num_inputs, action_space, args):
+        super(Hierarchial_interactor, self).__init__()
+        self.hidden_size = args.hidden_size
+        self.monitor_s = getattr(args, 'monitor_s', False)
+        if self.monitor_s:
+            self.s_values = []
+
+        num_outputs = action_space.n
+        self.num_outputs = num_outputs
+
+        use_rmsnorm = getattr(args, 'use_rmsnorm', False)
+        self.level1_encoder = EncoderRules234(num_inputs, latent_dim_conv=64, use_rmsnorm=use_rmsnorm)
+        self.level2_encoder = EncoderRules234_2()
+
+        self.critic_linear2 = nn.Linear(32*4*4, 1)
+        self.actor_linear2 = nn.Linear(32*4*4, 8)
+
+        self.interactor = nn.Sequential(
+            nn.Linear(8, 32),
+            nn.ReLU(),
+            nn.Linear(32, num_outputs)
+        )
+
+        self.critic_linear = nn.Linear(64*4*4, 1)
+        self.actor_linear = nn.Linear(64*4*4, num_outputs)
+
+        for linear in [self.critic_linear2, self.actor_linear2]:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
+            std = 1.0 / math.sqrt(fan_in)
+            nn.init.normal_(linear.weight, mean=0.0, std=std)
+            linear.bias.data.fill_(0)
+
+        for linear in [self.critic_linear, self.actor_linear]:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
+            std = 1.0 / math.sqrt(fan_in)
+            nn.init.normal_(linear.weight, mean=0.0, std=std)
+            linear.bias.data.fill_(0)
+
+        self.actor_linear.weight.data.mul_(0.01)
+        self.critic_linear.weight.data.mul_(1.0)
+
+        for layer in self.interactor:
+            if isinstance(layer, nn.Linear):
+                fan_in, _ = nn.init._calculate_fan_in_and_fan_out(layer.weight)
+                std = 1.0 / math.sqrt(fan_in)
+                nn.init.normal_(layer.weight, mean=0.0, std=std)
+                layer.bias.data.fill_(0)
+
+        self.train()
+
+    def forward(self, inputs, hx, cx, mem=None):
+        s, _, _, _ = self.level1_encoder(inputs)
+
+        if self.monitor_s:
+            self.s_values.append(s.detach().cpu())
+
+        hx = torch.Tensor([0])
+        cx = torch.Tensor([0])
+
+        s2 = s
+        s2, _, _, _ = self.level2_encoder(s2)
+        s2_flat = s2.view(s2.size(0), -1)
+        a2_logits = self.actor_linear2(s2_flat)
+        V2 = self.critic_linear2(s2_flat)
+
+        a2_probs = F.softmax(a2_logits, dim=1)
+        a2_sample = a2_probs.multinomial(1)
+        a2_onehot = torch.zeros_like(a2_probs)
+        a2_onehot.scatter_(1, a2_sample, 1.0)
+
+        a_21_logits = self.interactor(a2_onehot)
+
+        s_flat = s.view(s.size(0), -1)
+        s_flat = F.relu(s_flat)
+        a1_logits = self.actor_linear(s_flat)
+        V1 = self.critic_linear(s_flat)
+
+        combined_logits = a1_logits + a_21_logits.detach()
+
+        return V1, combined_logits, hx, cx, None, None, V2, a2_logits, a1_logits, a_21_logits

@@ -22,6 +22,8 @@ class Agent(object):
         self.rewards = []
         self.entropies = []
         self.entropies2 = []  # Actor2 entropies for hierarchical models
+        self.a1_logits = []
+        self.a_21_logits = []
         self.x_restoreds = []
         self.kls = []
         self.states = []
@@ -49,6 +51,8 @@ class Agent(object):
                     current_state, self.hx, self.cx, None
                 )
 
+        a1_logits_i = None
+        a_21_logits_i = None
         if len(model_output) == 4:
             value, logit, self.hx, self.cx = model_output
             x_restored = None
@@ -65,12 +69,15 @@ class Agent(object):
             value2 = None
             logit2 = None
         elif len(model_output) == 8:
-            # Hierarchical model: V1, a1, hx, cx, mem, mem_action, V2, a2
             value, logit, self.hx, self.cx, _, _, value2, logit2 = model_output
             x_restored = None
             kl = None
+        elif len(model_output) == 10:
+            value, logit, self.hx, self.cx, _, _, value2, logit2, a1_logits_i, a_21_logits_i = model_output
+            x_restored = None
+            kl = None
         else:
-            raise ValueError(f"Unexpected model output length: {len(model_output)}. Expected 4, 5, 6, or 8.")
+            raise ValueError(f"Unexpected model output length: {len(model_output)}. Expected 4, 5, 6, 8, or 10.")
         
         prob = F.softmax(logit, dim=1)
         log_prob = F.log_softmax(logit, dim=1)
@@ -89,7 +96,12 @@ class Agent(object):
             log_prob2 = log_prob2.gather(1, action2)
             self.log_probs2.append(log_prob2)
             self.values2.append(value2)
-        
+
+        if a1_logits_i is not None:
+            self.a1_logits.append(a1_logits_i)
+        if a_21_logits_i is not None:
+            self.a_21_logits.append(a_21_logits_i)
+
         # chosen action to onehot
         batch_size = 1
         num_outputs = logit.size(1)
@@ -198,6 +210,8 @@ class Agent(object):
         self.rewards = []
         self.entropies = []
         self.entropies2 = []
+        self.a1_logits = []
+        self.a_21_logits = []
         self.x_restoreds = []
         self.kls = []
         self.states = []

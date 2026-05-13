@@ -242,6 +242,11 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     action2 = prob2.multinomial(1).data # note: may sample differently in reality
                     last_log_prob2 = last_log_prob2.gather(1, action2).detach()
 
+            is_interactor = (args.model_type == 'Hierarchial_interactor')
+            bootstrap_a21_log = None
+            if is_interactor and model_output is not None and len(model_output) >= 10:
+                bootstrap_a21_log = F.log_softmax(model_output[9], dim=1).detach()
+
             player.values.append(R)
             
             # Check if model is hierarchical (has V2 and a2 outputs)
@@ -258,6 +263,8 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             value_loss = 0
             policy_loss2 = 0
             value_loss2 = 0
+            interactor_loss = 0
+            interactor_running_target = bootstrap_a21_log if is_interactor else None
             logprobs_summ = player.log_probs2[-1]
             
             # Determine which train version to use for level 2 calculations
@@ -338,7 +345,13 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 )
                 
                 # Actor2 loss (only for hierarchical)
-                if args.use_train_a2a1_connect:
+                if is_interactor and len(player.log_probs2) > i:
+                    policy_loss2 = (
+                        policy_loss2
+                        - (player.log_probs2[i] * gae)
+                        - (args.entropy_coef * player.entropies2[i])
+                    )
+                elif args.use_train_a2a1_connect:
                     policy_loss2 = (
                         policy_loss2
                         + 0.5*((player.log_probs2[i] - logprobs_summ)**2) * gae
@@ -349,7 +362,30 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                         - (player.log_probs2[i] * gae2)
                         - (args.entropy_coef * player.entropies2[i])
                     )
-                
+
+                # Interactor loss: KLD(pi(a_21_target), pi(a_21)) * (delta1 + delta2)
+                if is_interactor and len(player.a_21_logits) > i:
+                    a1_logits_i = player.a1_logits[i]
+                    a_21_logits_i = player.a_21_logits[i]
+
+                    if interactor_running_target is None:
+                        interactor_running_target = F.log_softmax(a_21_logits_i, dim=1)
+
+                    combined_logprob = F.log_softmax(
+                        a1_logits_i.detach() + a_21_logits_i, dim=1
+                    )
+                    interactor_running_target = (
+                        (1 - args.gamma) * combined_logprob
+                        + args.gamma * interactor_running_target
+                    )
+
+                    target_dist = F.softmax(interactor_running_target, dim=1)
+                    pred_log_dist = F.log_softmax(a_21_logits_i, dim=1)
+                    kld_i = F.kl_div(
+                        pred_log_dist, target_dist, reduction='batchmean'
+                    )
+                    scaling = (delta_t + delta_t2) if delta_t2 is not None else delta_t
+                    interactor_loss = interactor_loss + kld_i * scaling
 
             # Additional losses for VAE models (only compute if weights > 0)
             kld_loss = 0
@@ -366,8 +402,10 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             if is_hierarchical:
                 value_loss = value_loss + value_loss2
             
-            # Total loss: actor1 + actor2 + combined critic loss
-            if is_hierarchical:
+            # Total loss: actor1 + actor2 + combined critic loss + interactor
+            if is_interactor:
+                total_loss = policy_loss + policy_loss2 + 0.5 * value_loss + interactor_loss + kld_loss + restoration_loss
+            elif is_hierarchical:
                 total_loss = policy_loss + policy_loss2 + 0.5 * value_loss + kld_loss + restoration_loss
             else:
                 total_loss = policy_loss + 0.5 * value_loss + kld_loss + restoration_loss
