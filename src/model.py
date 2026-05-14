@@ -1102,11 +1102,7 @@ class Hierarchial_interactor(nn.Module):
         self.critic_linear2 = nn.Linear(32*4*4, 1)
         self.actor_linear2 = nn.Linear(32*4*4, 8)
 
-        self.interactor = nn.Sequential(
-            nn.Linear(8, 32),
-            nn.ReLU(),
-            nn.Linear(32, num_outputs)
-        )
+        self.interactor = nn.Linear(8, num_outputs)
 
         self.critic_linear = nn.Linear(64*4*4, 1)
         self.actor_linear = nn.Linear(64*4*4, num_outputs)

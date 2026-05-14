@@ -372,7 +372,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                         interactor_running_target = F.log_softmax(a_21_logits_i, dim=1)
 
                     combined_logprob = F.log_softmax(
-                        a1_logits_i.detach() + a_21_logits_i, dim=1
+                        a1_logits_i.detach(), dim=1
                     )
                     interactor_running_target = (
                         (1 - args.gamma) * combined_logprob
