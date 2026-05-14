@@ -1122,12 +1122,10 @@ class Hierarchial_interactor(nn.Module):
         self.actor_linear.weight.data.mul_(0.01)
         self.critic_linear.weight.data.mul_(1.0)
 
-        for layer in self.interactor:
-            if isinstance(layer, nn.Linear):
-                fan_in, _ = nn.init._calculate_fan_in_and_fan_out(layer.weight)
-                std = 1.0 / math.sqrt(fan_in)
-                nn.init.normal_(layer.weight, mean=0.0, std=std)
-                layer.bias.data.fill_(0)
+        fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.interactor.weight)
+        std = 1.0 / math.sqrt(fan_in)
+        nn.init.normal_(self.interactor.weight, mean=0.0, std=std)
+        self.interactor.bias.data.fill_(0)
 
         self.train()
 
