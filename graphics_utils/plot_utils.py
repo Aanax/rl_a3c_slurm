@@ -442,7 +442,7 @@ def load_monitor_losses(losses_dir):
     return losses_by_rank
 
 
-def plot_monitor_losses(losses_dir, aggregate="mean", figsize=(12, 10)):
+def plot_monitor_losses(losses_dir, aggregate="mean", figsize=(15, 30), n_cols=1, scale=None, skip_losses=None):
     """
     Plot monitor losses saved by train.py when args.monitor_losses=True.
     Expected files: losses_rank*.csv with columns:
@@ -452,8 +452,18 @@ def plot_monitor_losses(losses_dir, aggregate="mean", figsize=(12, 10)):
     if not losses_by_rank:
         raise FileNotFoundError(f"No losses_rank*.csv found in: {losses_dir}")
 
-    loss_cols = ["policy_loss", "value_loss", "kld_loss", "restoration_loss", "value_intrinsic_loss"]
-    fig, axes = plt.subplots(3, 2, figsize=figsize, sharex=True)
+    # Infer loss columns from CSV header and skip the first index-like column.
+    first_df = next(iter(losses_by_rank.values()))
+    skip_set = set(skip_losses or [])
+    loss_cols = [
+        c for c in first_df.columns
+        if c not in ("batch_num", "Unnamed: 0") and c not in skip_set
+    ]
+    if not loss_cols:
+        raise ValueError("No loss columns found in monitor-loss CSV files.")
+
+    n_rows = int(np.ceil(len(loss_cols) / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, sharex=True)
     axes = axes.flatten()
 
     if aggregate is None:
@@ -466,31 +476,39 @@ def plot_monitor_losses(losses_dir, aggregate="mean", figsize=(12, 10)):
     else:
         agg = aggregate.lower()
         for ax, col in zip(axes, loss_cols):
-            curves = []
-            x_ref = None
-            for _, df in sorted(losses_by_rank.items()):
+            merged = None
+            for rank, df in sorted(losses_by_rank.items()):
                 if col not in df.columns:
                     continue
-                n = len(df)
-                if x_ref is None or n < len(x_ref):
-                    x_ref = df["batch_num"].values
-                curves.append(df[col].values)
-            if not curves:
+                tmp = df[["batch_num", col]].copy()
+                tmp["batch_num"] = pd.to_numeric(tmp["batch_num"], errors="coerce")
+                tmp[col] = pd.to_numeric(tmp[col], errors="coerce")
+                tmp = tmp.dropna()
+                # If duplicate batch_num exists inside one rank, average first.
+                s = tmp.groupby("batch_num", as_index=True)[col].mean()
+                s.name = f"rank_{rank}"
+                if merged is None:
+                    merged = s.to_frame()
+                else:
+                    # Use intersection so each aggregated point uses all ranks.
+                    merged = merged.join(s, how="inner")
+            if merged is None or merged.empty:
                 continue
-            min_len = min(len(c) for c in curves)
-            arr = np.stack([c[:min_len] for c in curves], axis=0)
-            x = x_ref[:min_len]
+            merged = merged.sort_index()
             if agg == "median":
-                y = np.median(arr, axis=0)
+                y = merged.median(axis=1).values
                 label = "median across ranks"
             else:
-                y = np.mean(arr, axis=0)
+                y = merged.mean(axis=1).values
                 label = "mean across ranks"
+            x = merged.index.values
             ax.plot(x, y, label=label)
             ax.legend()
 
     for ax, col in zip(axes, loss_cols):
         ax.set_title(col)
+        if scale:
+            ax.set_yscale(scale)
         ax.grid(alpha=0.3)
     for ax in axes[len(loss_cols):]:
         ax.axis("off")
@@ -498,3 +516,75 @@ def plot_monitor_losses(losses_dir, aggregate="mean", figsize=(12, 10)):
     axes[-2].set_xlabel("batch_num")
     fig.tight_layout()
     return fig, axes
+
+
+def load_monitor_cosines(cosines_dir):
+    """Load cosine CSVs (cosine_const_rank*.csv) into dict {rank: DataFrame}."""
+    import glob
+    import re
+
+    csv_paths = sorted(glob.glob(os.path.join(cosines_dir, "cosine_const_rank*.csv")))
+    cosines_by_rank = {}
+    for path in csv_paths:
+        match = re.search(r"cosine_const_rank(\d+)\.csv$", os.path.basename(path))
+        if match is None:
+            continue
+        rank = int(match.group(1))
+        cosines_by_rank[rank] = pd.read_csv(path)
+    return cosines_by_rank
+
+
+def plot_monitor_cosines(cosines_dir, aggregate="mean", figsize=(12, 4), scale=None):
+    """
+    Plot cosine_const logs saved by train.py when monitor_cosine_const=True.
+    Expected columns: batch_num, step_idx, cosine_const.
+    """
+    cosines_by_rank = load_monitor_cosines(cosines_dir)
+    if not cosines_by_rank:
+        raise FileNotFoundError(f"No cosine_const_rank*.csv found in: {cosines_dir}")
+
+    fig, ax = plt.subplots(1, 1, figsize=figsize)
+
+    if aggregate is None:
+        for rank, df in sorted(cosines_by_rank.items()):
+            tmp = df[["batch_num", "step_idx", "cosine_const"]].copy()
+            tmp["cosine_const"] = pd.to_numeric(tmp["cosine_const"], errors="coerce")
+            tmp = tmp.dropna().reset_index(drop=True)
+            x = np.arange(len(tmp))
+            ax.plot(x, tmp["cosine_const"].values, alpha=0.8, label=f"rank {rank}")
+        ax.legend()
+    else:
+        agg = aggregate.lower()
+        merged = None
+        for rank, df in sorted(cosines_by_rank.items()):
+            tmp = df[["batch_num", "step_idx", "cosine_const"]].copy()
+            tmp["batch_num"] = pd.to_numeric(tmp["batch_num"], errors="coerce")
+            tmp["step_idx"] = pd.to_numeric(tmp["step_idx"], errors="coerce")
+            tmp["cosine_const"] = pd.to_numeric(tmp["cosine_const"], errors="coerce")
+            tmp = tmp.dropna()
+            s = tmp.groupby(["batch_num", "step_idx"], as_index=True)["cosine_const"].mean()
+            s.name = f"rank_{rank}"
+            if merged is None:
+                merged = s.to_frame()
+            else:
+                merged = merged.join(s, how="inner")
+        if merged is None or merged.empty:
+            raise ValueError("No overlapping (batch_num, step_idx) points across ranks.")
+        merged = merged.sort_index()
+        if agg == "median":
+            y = merged.median(axis=1).values
+            label = "median across ranks"
+        else:
+            y = merged.mean(axis=1).values
+            label = "mean across ranks"
+        x = np.arange(len(y))
+        ax.plot(x, y, label=label)
+        ax.legend()
+
+    ax.set_title("cosine_const")
+    if scale:
+        ax.set_yscale(scale)
+    ax.set_xlabel("global_step")
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    return fig, ax

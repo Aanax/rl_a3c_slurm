@@ -168,6 +168,12 @@ def run_evaluation(net, env, args):
     Returns dictionaries with collected data for each episode.
     """
     gpu_id = args.gpu_id
+    oracle_types = (
+        model_module.A3CRules2378Oracle,
+        model_module.A3CRules2378OracleFC,
+        model_module.A3CRules2378OracleIntrinsicCritic,
+        model_module.A3CRules2378OracleFCIntrinsicCritic,
+    )
     
     all_episodes_data = []
     
@@ -188,6 +194,7 @@ def run_evaluation(net, env, args):
         rewards = []  # Rewards received
         Vs = []  # Level 1 values
         Vs2 = []  # Level 2 values
+        x_restoreds = []  # Oracle decoder outputs
         
         reward_sum = 0
         step_count = 0
@@ -207,8 +214,15 @@ def run_evaluation(net, env, args):
             # Parse model output: (V1, a1, hx, cx, None, None, V2, a2_logits)
             V1 = model_output[0]
             a1_logits = model_output[1]
-            V2 = model_output[6]
-            a2_logits = model_output[7]
+            V2 = None
+            a2_logits = None
+            x_restored = None
+            if isinstance(net, oracle_types):
+                x_restored = model_output[4]
+            else:
+                # Default: treat non-oracle models as hierarchical-style outputs.
+                V2 = model_output[6]
+                a2_logits = model_output[7]
             
             # Get action probabilities and select action (greedy)
             prob = F.softmax(a1_logits, dim=1)
@@ -219,10 +233,15 @@ def run_evaluation(net, env, args):
             ss.append(net.s_values[-1].cpu().numpy() if hasattr(net, 's_values') and net.s_values 
                       else torch.zeros(1, 64, 4, 4).numpy())  # Level 1 features
             Q11s.append(a1_logits.cpu().numpy()[0])  # Level 1 logits
-            Q22s.append(a2_logits.cpu().numpy()[0])  # Level 2 logits (16-dim)
+            if a2_logits is not None:
+                Q22s.append(a2_logits.cpu().numpy()[0])  
             aas.append([action])  # Action taken
             Vs.append(V1.cpu().numpy()[0])  # Level 1 value
-            Vs2.append(V2.cpu().numpy()[0])  # Level 2 value
+# Level 2 logits (16-dim)
+            if V2 is not None:
+                Vs2.append(V2.cpu().numpy()[0])  # Level 2 value
+            if x_restored is not None:
+                x_restoreds.append(x_restored.cpu().numpy()[0])
             
             # Render if requested
             if args.render and episode_idx % args.render_freq == 0:
@@ -247,12 +266,16 @@ def run_evaluation(net, env, args):
             'Frames_normalized_orig': np.array(frames_normalized_orig),
             'ss': np.array(ss),
             'Q11s': np.array(Q11s),
-            'Q22s': np.array(Q22s),
             'aas': np.array(aas),
             'rewards': np.array(rewards),
             'Vs': np.array(Vs),
-            'Vs2': np.array(Vs2),
         }
+        if len(Q22s) > 0:
+            episode_data['Q22s'] = np.array(Q22s)
+        if len(Vs2) > 0:
+            episode_data['Vs2'] = np.array(Vs2)
+        if len(x_restoreds) > 0:
+            episode_data['x_restoreds'] = np.array(x_restoreds)
         
         if frames_render:
             episode_data['frames_render'] = frames_render

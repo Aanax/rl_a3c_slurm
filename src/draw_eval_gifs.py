@@ -27,20 +27,20 @@ Example:
     python src/draw_eval_gifs.py Eval_2026-03-29_00:21:09_PongNoFrameskip-v4 --remote-path /home/users/aamore/rl_a3c_pytorch/logs/eval/
 """
 
-import torch
-import copy
+# import torch
+# import copy
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')  # Non-interactive backend
 import matplotlib.pyplot as plt
-import cv2
-import torch.nn as nn
+# import cv2
+# import torch.nn as nn
 import imageio
 from tqdm import tqdm
 import os
-import subprocess
-import sys
-import time
+# import subprocess
+# import sys
+# import time
 import argparse
 from matplotlib import gridspec
 
@@ -163,6 +163,96 @@ def draw_frames_with_info(values, images, experiment_title, start_idx=0, stop_id
     return results
 
 
+def draw_frames_with_restored(images, restored_images, experiment_title, start_idx=0, stop_idx=-1, pad=1):
+    """
+    Draw original and restored frames side-by-side.
+    """
+    fig = plt.figure(figsize=(14, 7))
+    fig.suptitle(experiment_title)
+    fig.tight_layout(pad=pad)
+
+    gs = gridspec.GridSpec(1, 2)
+    ax_orig = plt.subplot(gs[0, 0])
+    ax_rest = plt.subplot(gs[0, 1])
+
+    if stop_idx < 0:
+        stop_idx = min(len(images), len(restored_images))
+    else:
+        stop_idx = min(stop_idx, len(images), len(restored_images))
+
+    results = []
+    for idx in tqdm(range(start_idx, stop_idx), desc="Drawing restored frames"):
+        img = images[idx]
+        rest = restored_images[idx]
+
+        # Original image format handling
+        if len(img.shape) == 3:
+            if img.shape[0] == 1:
+                img_display = img[0]
+            elif img.shape[0] == 2:
+                img_display = img[0]
+            elif img.shape[0] == 3:
+                img_display = np.transpose(img, (1, 2, 0))
+            elif img.shape[2] == 1:
+                img_display = img[:, :, 0]
+            elif img.shape[2] in [2, 3, 4]:
+                img_display = img
+            else:
+                img_display = img[0] if img.shape[0] < img.shape[2] else img[:, :, 0]
+        else:
+            img_display = img
+
+        # Restored image format handling
+        if len(rest.shape) == 3:
+            if rest.shape[0] == 1:
+                rest_display = rest[0]
+            elif rest.shape[0] == 2:
+                rest_display = rest[0]
+            elif rest.shape[0] == 3:
+                rest_display = np.transpose(rest, (1, 2, 0))
+            elif rest.shape[2] == 1:
+                rest_display = rest[:, :, 0]
+            elif rest.shape[2] in [2, 3, 4]:
+                rest_display = rest
+            else:
+                rest_display = rest[0] if rest.shape[0] < rest.shape[2] else rest[:, :, 0]
+        else:
+            rest_display = rest
+
+        ax_orig.imshow(img_display, cmap='gray' if len(img_display.shape) == 2 else None)
+        ax_orig.set_title("original")
+        ax_orig.axis('off')
+
+        ax_rest.imshow(rest_display, cmap='gray' if len(rest_display.shape) == 2 else None)
+        ax_rest.set_title("x_restored")
+        ax_rest.axis('off')
+
+        fig.tight_layout(pad=pad)
+        fig.canvas.draw()
+        fig.canvas.flush_events()
+        width, height = fig.canvas.get_width_height()
+        if hasattr(fig.canvas, 'buffer_rgba'):
+            buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
+            buf = buf.reshape((height, width, 4))
+            image_from_plot = buf[:, :, :3]
+        elif hasattr(fig.canvas, 'tostring_rgb'):
+            image_from_plot = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+            image_from_plot = image_from_plot.reshape((height, width, 3))
+        elif hasattr(fig.canvas, 'tostring_argb'):
+            buf = np.frombuffer(fig.canvas.tostring_argb(), dtype=np.uint8)
+            buf = buf.reshape((height, width, 4))
+            image_from_plot = buf[:, :, 1:]
+        else:
+            raise RuntimeError("Cannot get RGB data from figure canvas")
+
+        results.append(image_from_plot.copy())
+        ax_orig.cla()
+        ax_rest.cla()
+
+    plt.close(fig)
+    return results
+
+
 def download_eval_files(eval_folder, local_dir, server, username, remote_project_path, pkey_path="~/.ssh/id_rsa"):
     """
     Download evaluation files from remote server via SFTP.
@@ -219,7 +309,8 @@ def download_eval_files(eval_folder, local_dir, server, username, remote_project
     needed_suffixes = [
         'Q11s.npy', 'Q22s.npy', 'Q21s.npy', 'aas.npy',
         'Frames_normalized_orig.npy', 'Vs.npy', 'Vs2.npy',
-        'rewards.npy', 'gs2.npy', 'gs1.npy', 'ss.npy', 'ss2.npy'
+        'rewards.npy', 'gs2.npy', 'gs1.npy', 'ss.npy', 'ss2.npy',
+        'x_restoreds.npy'
     ]
     
     # Find files to download
@@ -291,6 +382,7 @@ def load_eval_data(eval_folder, local_dir):
         'Frames_normalized_orig.npy': 'frames',  # Normalized frames
         'ss.npy': 'ss',           # Level 1 features
         'ss2.npy': 'ss2',         # Level 2 features
+        'x_restoreds.npy': 'x_restoreds',  # Oracle restored frames
     }
     
     for filename in all_files:
@@ -432,6 +524,33 @@ def create_values_gif(data, eval_folder, local_dir, fps=3, start_idx=0, stop_idx
     del dd
 
 
+def create_restored_gif(data, eval_folder, local_dir, fps=3, start_idx=0, stop_idx=300):
+    """
+    Create side-by-side video for original and x_restored frames.
+    """
+    print("\n[draw] Creating x_restored visualization...")
+
+    frames = data['frames']
+    x_restoreds = data.get('x_restoreds', None)
+    if x_restoreds is None:
+        print("[draw] No x_restoreds found, skipping.")
+        return
+
+    dd = draw_frames_with_restored(
+        frames,
+        x_restoreds,
+        f'{eval_folder} - x_restoreds',
+        start_idx=start_idx,
+        stop_idx=stop_idx,
+    )
+
+    output_path = os.path.join(local_dir, "x_restoreds.mp4")
+    print(f"[draw] Saving to {output_path}")
+    imageio.mimsave(output_path, dd, fps=fps)
+    print(f"[draw] x_restoreds GIF saved!")
+    del dd
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Download eval results and create visualization GIFs',
@@ -523,10 +642,21 @@ Example:
         print(f"[main] Error creating values GIF: {e}")
         import traceback
         traceback.print_exc()
+
+    try:
+        create_restored_gif(
+            data, args.eval_folder, local_dir,
+            fps=args.fps, start_idx=args.start_idx, stop_idx=args.stop_idx
+        )
+    except Exception as e:
+        print(f"[main] Error creating x_restored GIF: {e}")
+        import traceback
+        traceback.print_exc()
     
     print(f"\n[main] Done! Output files in: {local_dir}")
     print(f"  - {os.path.join(local_dir, 'actions.mp4')}")
     print(f"  - {os.path.join(local_dir, 'VS_short.mp4')}")
+    print(f"  - {os.path.join(local_dir, 'x_restoreds.mp4')}")
 
 
 if __name__ == '__main__':

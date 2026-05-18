@@ -106,6 +106,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
     game_count = 0
     batch_count = 0
     loss_csv_path = None
+    cosine_csv_path = None
     last_save = 0
     if args.monitor_losses:
         log_dir_path = f"{args.log_dir}{args.experiment_name}/"
@@ -113,7 +114,14 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
         loss_csv_path = f"{log_dir_path}losses_rank{rank}.csv"
         with open(loss_csv_path, 'w', newline='') as csvfile:
             writer = csv.writer(csvfile)
-            writer.writerow(['batch_num', 'policy_loss', 'value_loss', 'value_intrinsic_loss', 'kld_loss', 'restoration_loss'])
+            writer.writerow(['batch_num', 'policy_loss', 'value_loss', 'kld_loss', 'restoration_loss', 'value_intrinsic_loss'])
+    if args.monitor_cosine_const:
+        log_dir_path = f"{args.log_dir}{args.experiment_name}/"
+        os.makedirs(log_dir_path, exist_ok=True)
+        cosine_csv_path = f"{log_dir_path}cosine_const_rank{rank}.csv"
+        with open(cosine_csv_path, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(['batch_num', 'step_idx', 'cosine_const'])
     try:
         while 1:
             if gpu_id >= 0:
@@ -219,6 +227,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             restoration_loss = 0
             policy_loss2 = 0
             value_loss2 = 0
+            cosine_const_values = []
             
             # Determine which train version to use for level 2 calculations
             train_version = getattr(args, 'train_version', 'v1')
@@ -230,7 +239,6 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 r2 = (1 - args.gamma) * player.values[-1].detach()
                 # V2Target = V2[H].detach() - use the last value2 (bootstrap)
                 V2Target = player.values2[-1].detach()
-            
 
             if args.w_restoration_loss > 0 and len(player.x_restoreds) > 0:
                 G_t = player.x_restoreds[-1].clone()
@@ -247,15 +255,16 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 )
 
                 # Intrinsic critic target (oracle reward).
-                if args.w_restoration_loss > 0 and len(player.x_restoreds) > i and len(player.states) > i:
+                if args.w_restoration_loss > 0 and len(player.x_restoreds) > 0:
                     G_t = G_t * args.gamma_restoration + player.next_states[i] - player.states[i]
 
-                    cosine = F.cosine_similarity(
+                    cosine_const = F.cosine_similarity(
                         player.x_restoreds[i].detach().view(-1),
                         G_t.detach().view(-1), 
                         dim=0
                     ).squeeze(0)
-                    oracle_r = (1.0 - args.gamma) * cosine
+                    cosine_const_values.append(cosine_const.item())
+                    oracle_r = (1.0 - args.gamma) * cosine_const
 
                     R_intrinsic = args.gamma * R_intrinsic + oracle_r
                     intrinsic_advantage = R_intrinsic - player.values_intrinsic[i]
@@ -267,12 +276,12 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                         - player.values_intrinsic[i].data
                     )
 
-                    cosine = -F.cosine_similarity(
+                    cosine_restoreds = -F.cosine_similarity(
                         player.x_restoreds[i].view(-1),
                         G_t.detach().view(-1),
                         dim=0,
                     )
-                    restoration_loss = restoration_loss + args.w_restoration_loss * cosine * delta_t
+                    restoration_loss = restoration_loss + args.w_restoration_loss * cosine_restoreds * delta_t
                 else:
                     delta_t_intrinsic = 0.0
 
@@ -340,9 +349,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             if is_hierarchical:
                 total_loss = policy_loss + policy_loss2 + 0.5 * value_loss + kld_loss + restoration_loss
             else:
-                total_loss = policy_loss + 0.5 * value_loss + kld_loss + restoration_loss
-
-                total_loss = total_loss + 0.5 * value_intrinsic_loss
+                total_loss = policy_loss + 0.5 * value_loss + kld_loss + restoration_loss + 0.5 * value_intrinsic_loss
             player.model.zero_grad()
             total_loss.backward()
             ensure_shared_grads(player.model, shared_model, gpu=gpu_id >= 0)
@@ -371,9 +378,17 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                         policy_loss.item(),
                         (0.5 * value_loss).item(),
                         kld_loss.item() if isinstance(kld_loss, torch.Tensor) else kld_loss,
-                        restoration_loss.item() if isinstance(restoration_loss, torch.Tensor) else restoration_loss
+                        restoration_loss.item() if isinstance(restoration_loss, torch.Tensor) else restoration_loss,
                         (0.5 * value_intrinsic_loss).item(),
                     ])
+            elif args.monitor_cosine_const:
+                batch_count += 1
+
+            if args.monitor_cosine_const:
+                with open(cosine_csv_path, 'a', newline='') as csvfile:
+                    writer = csv.writer(csvfile)
+                    for step_idx, cosine_const in enumerate(cosine_const_values):
+                        writer.writerow([batch_count, step_idx, cosine_const])
 
             player.clear_actions()
             steps_taken = step + 1 if player.done else num_steps
