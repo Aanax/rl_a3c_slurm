@@ -27,6 +27,8 @@ Output format (saved as .npy files):
     Vs.npy - Level 1 values (N, 1)
     Vs2.npy - Level 2 values (N, 1)
     ss.npy - Level 1 encoder features (N, 64, 4, 4)
+
+    sbatch slurm_scripts/run_eval.sh ./configs/run_config_our3.ini ./logs/Hierarchial_a2a1_connect_32w_g_09_g2_099_15.dat --zero-a2
 """
 
 from __future__ import print_function, division
