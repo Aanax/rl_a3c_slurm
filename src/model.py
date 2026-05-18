@@ -1162,7 +1162,7 @@ class Hierarchial_interactor(nn.Module):
 
 class Hierarchial_interactor_zeroing(nn.Module):
     def __init__(self, num_inputs, action_space, args):
-        super(Hierarchial_interactor, self).__init__()
+        super(Hierarchial_interactor_zeroing, self).__init__()
         self.hidden_size = args.hidden_size
         self.monitor_s = getattr(args, 'monitor_s', False)
         if self.monitor_s:
