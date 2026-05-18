@@ -1217,19 +1217,19 @@ class Hierarchial_interactor_zeroing(nn.Module):
         s2 = s
         s2, _, _, _ = self.level2_encoder(s2)
         s2_flat = s2.view(s2.size(0), -1)
-        a2_logits = self.actor_linear2(s2_flat)*0
+        a2_logits = self.actor_linear2(s2_flat)
         V2 = self.critic_linear2(s2_flat)
 
         a2_probs = F.softmax(a2_logits, dim=1)
-        a2_sample = a2_probs.multinomial(1)*0
+        a2_sample = a2_probs.multinomial(1)
         a2_onehot = torch.zeros_like(a2_probs)
         a2_onehot.scatter_(1, a2_sample, 1.0)
 
-        a_21_logits = self.interactor(a2_onehot*0)
+        a_21_logits = self.interactor(a2_onehot)
 
         s_flat = s.view(s.size(0), -1)
         s_flat = F.relu(s_flat)
-        a1_logits = self.actor_linear(s_flat)
+        a1_logits = self.actor_linear(s_flat)*0
         V1 = self.critic_linear(s_flat)
 
         combined_logits = a1_logits + a_21_logits.detach()
