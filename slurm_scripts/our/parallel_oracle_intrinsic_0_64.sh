@@ -1,9 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-name_part="oracle_intrinsic_8_0"
+name_part="oracle_intrinsic_0_64"
 
 /s/ls4/users/dartl0l/goarl/rl_a3c_slurm/slurm_scripts/our/parallel_oracle_runner.sh "$@" \
   "${name_part}" \
-  /s/ls4/users/dartl0l/goarl/rl_a3c_slurm/configs/run_config_oracle_intrinsic_8_0.ini \
+  /s/ls4/users/dartl0l/goarl/rl_a3c_slurm/configs/run_config_oracle_intrinsic_0_64.ini \
   > "run_ids_${name_part}.txt"

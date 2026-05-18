@@ -534,34 +534,64 @@ def load_monitor_cosines(cosines_dir):
     return cosines_by_rank
 
 
-def plot_monitor_cosines(cosines_dir, aggregate="mean", figsize=(12, 4), scale=None):
+def plot_monitor_cosines(
+    cosines_dir,
+    aggregate="mean",
+    figsize=(12, 4),
+    scale=None,
+    last_batch_only=False,
+    ranks_to_plot=None,
+):
     """
     Plot cosine_const logs saved by train.py when monitor_cosine_const=True.
     Expected columns: batch_num, step_idx, cosine_const.
+    If last_batch_only=True, keep only the maximum batch_num before plotting.
+    If ranks_to_plot is set, plot only that rank id.
     """
     cosines_by_rank = load_monitor_cosines(cosines_dir)
     if not cosines_by_rank:
         raise FileNotFoundError(f"No cosine_const_rank*.csv found in: {cosines_dir}")
+    if ranks_to_plot is not None:
+        rank_id = int(ranks_to_plot)
+        try:
+            rank_items = [(rank_id, cosines_by_rank[rank_id])]
+        except KeyError:
+            available_ranks = [rank for rank, _ in sorted(cosines_by_rank.items())]
+            raise ValueError(
+                f"Rank {rank_id} not found. Available ranks: {available_ranks}"
+            )
+    else:
+        rank_items = sorted(cosines_by_rank.items())
 
     fig, ax = plt.subplots(1, 1, figsize=figsize)
 
     if aggregate is None:
-        for rank, df in sorted(cosines_by_rank.items()):
+        for rank, df in rank_items:
             tmp = df[["batch_num", "step_idx", "cosine_const"]].copy()
+            tmp["batch_num"] = pd.to_numeric(tmp["batch_num"], errors="coerce")
+            tmp["step_idx"] = pd.to_numeric(tmp["step_idx"], errors="coerce")
             tmp["cosine_const"] = pd.to_numeric(tmp["cosine_const"], errors="coerce")
             tmp = tmp.dropna().reset_index(drop=True)
+            if last_batch_only:
+                if tmp.empty:
+                    continue
+                tmp = tmp[tmp["batch_num"] == tmp["batch_num"].max()].reset_index(drop=True)
             x = np.arange(len(tmp))
             ax.plot(x, tmp["cosine_const"].values, alpha=0.8, label=f"rank {rank}")
         ax.legend()
     else:
         agg = aggregate.lower()
         merged = None
-        for rank, df in sorted(cosines_by_rank.items()):
+        for rank, df in rank_items:
             tmp = df[["batch_num", "step_idx", "cosine_const"]].copy()
             tmp["batch_num"] = pd.to_numeric(tmp["batch_num"], errors="coerce")
             tmp["step_idx"] = pd.to_numeric(tmp["step_idx"], errors="coerce")
             tmp["cosine_const"] = pd.to_numeric(tmp["cosine_const"], errors="coerce")
             tmp = tmp.dropna()
+            if last_batch_only:
+                if tmp.empty:
+                    continue
+                tmp = tmp[tmp["batch_num"] == tmp["batch_num"].max()]
             s = tmp.groupby(["batch_num", "step_idx"], as_index=True)["cosine_const"].mean()
             s.name = f"rank_{rank}"
             if merged is None:
@@ -584,7 +614,7 @@ def plot_monitor_cosines(cosines_dir, aggregate="mean", figsize=(12, 4), scale=N
     ax.set_title("cosine_const")
     if scale:
         ax.set_yscale(scale)
-    ax.set_xlabel("global_step")
+    ax.set_xlabel("step_in_plot" if last_batch_only else "global_step")
     ax.grid(alpha=0.3)
     fig.tight_layout()
     return fig, ax
