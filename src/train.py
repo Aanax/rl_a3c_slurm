@@ -99,6 +99,11 @@ def compute_level2_loss_v2(args, player, i, r2, V2Target, gae2):
     return advantage2, value_loss2_i, delta_t2, gae2, r2, V2Target
 
 
+def sampled_action_target(action, logits):
+    target = torch.zeros_like(logits)
+    return target.scatter(1, action, 1.0)
+
+
 def train(rank, args, shared_model, optimizer, env_conf, frames_total):
     ptitle(f"Train Agent: {rank}")
     gpu_id = args.gpu_ids[rank % len(args.gpu_ids)]
@@ -243,10 +248,6 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     last_log_prob2 = last_log_prob2.gather(1, action2).detach()
 
             is_interactor = (args.model_type == 'Hierarchial_interactor')
-            bootstrap_a21_log = None
-            if is_interactor and model_output is not None and len(model_output) >= 10:
-                bootstrap_a21_log = F.log_softmax(model_output[9], dim=1).detach()
-
             player.values.append(R)
             
             # Check if model is hierarchical (has V2 and a2 outputs)
@@ -264,7 +265,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             policy_loss2 = 0
             value_loss2 = 0
             interactor_loss = 0
-            interactor_running_target = bootstrap_a21_log if is_interactor else None
+            interactor_running_target = None
             logprobs_summ = player.log_probs2[-1]
             
             # Determine which train version to use for level 2 calculations
@@ -364,23 +365,28 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     )
 
                 # Interactor loss: KLD(pi(a_21_target), pi(a_21)) * (delta1 + delta2)
-                if is_interactor and len(player.a_21_logits) > i:
+                if is_interactor and len(player.a_21_logits) > i and len(player.actions) > i:
                     a1_logits_i = player.a1_logits[i]
                     a_21_logits_i = player.a_21_logits[i]
 
                     if interactor_running_target is None:
-                        interactor_running_target = F.log_softmax(a_21_logits_i, dim=1)
+                        interactor_running_target = F.softmax(
+                            a1_logits_i.detach() + a_21_logits_i, dim=1
+                        ).detach()
 
-                    combined_logprob = F.log_softmax(
-                        a1_logits_i.detach(), dim=1
+                    sampled_target = sampled_action_target(
+                        player.actions[i],
+                        a_21_logits_i,
                     )
                     interactor_running_target = (
-                        (1 - args.gamma) * combined_logprob
-                        + args.gamma * interactor_running_target
-                    )
+                        args.gamma * interactor_running_target
+                        + (1 - args.gamma) * sampled_target
+                    ).detach()
 
-                    target_dist = F.softmax(interactor_running_target, dim=1)
-                    pred_log_dist = F.log_softmax(a_21_logits_i, dim=1)
+                    target_dist = interactor_running_target
+                    pred_log_dist = F.log_softmax(
+                        a1_logits_i.detach() + a_21_logits_i, dim=1
+                    )
                     kld_i = F.kl_div(
                         pred_log_dist, target_dist, reduction='batchmean'
                     )

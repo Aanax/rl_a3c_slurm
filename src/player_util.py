@@ -22,6 +22,7 @@ class Agent(object):
         self.rewards = []
         self.entropies = []
         self.entropies2 = []  # Actor2 entropies for hierarchical models
+        self.actions = []
         self.a1_logits = []
         self.a_21_logits = []
         self.x_restoreds = []
@@ -133,6 +134,7 @@ class Agent(object):
         self.reward = max(min(self.reward, 1), -1)
         self.values.append(value)
         self.log_probs.append(log_prob)
+        self.actions.append(action)
         self.rewards.append(self.reward)
         self.states.append(current_state)
         if x_restored is not None:
@@ -210,6 +212,7 @@ class Agent(object):
         self.rewards = []
         self.entropies = []
         self.entropies2 = []
+        self.actions = []
         self.a1_logits = []
         self.a_21_logits = []
         self.x_restoreds = []
