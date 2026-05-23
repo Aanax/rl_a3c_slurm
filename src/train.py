@@ -247,7 +247,9 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     action2 = prob2.multinomial(1).data # note: may sample differently in reality
                     last_log_prob2 = last_log_prob2.gather(1, action2).detach()
 
-            is_interactor = (args.model_type == 'Hierarchial_interactor')
+            is_interactor = args.model_type in (
+                'Hierarchial_interactor', 'Hierarchial_interactor_zeroing'
+            )
             player.values.append(R)
             
             # Check if model is hierarchical (has V2 and a2 outputs)
@@ -266,6 +268,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             value_loss2 = 0
             interactor_loss = 0
             interactor_running_target = None
+            level2_running_target = None
             logprobs_summ = player.log_probs2[-1]
             
             # Determine which train version to use for level 2 calculations
@@ -345,13 +348,31 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     - (args.entropy_coef * player.entropies[i])
                 )
                 
-                # Actor2 loss (only for hierarchical)
-                if is_interactor and len(player.log_probs2) > i:
-                    policy_loss2 = (
-                        policy_loss2
-                        - (player.log_probs2[i] * gae)
-                        - (args.entropy_coef * player.entropies2[i])
+                # Actor2 loss: KLD vs empirical a2 distribution (interactor models)
+                if is_interactor and len(player.a2_logits) > i and len(player.actions2) > i:
+                    a2_logits_i = player.a2_logits[i]
+
+                    if level2_running_target is None:
+                        level2_running_target = F.softmax(
+                            a2_logits_i, dim=1
+                        ).detach()
+
+                    sampled_target = sampled_action_target(
+                        player.actions2[i],
+                        a2_logits_i,
                     )
+                    level2_running_target = (
+                        args.gamma * level2_running_target
+                        + (1 - args.gamma) * sampled_target
+                    ).detach()
+
+                    target_dist = level2_running_target
+                    pred_log_dist = F.log_softmax(a2_logits_i, dim=1)
+                    kld_i = F.kl_div(
+                        pred_log_dist, target_dist, reduction='batchmean'
+                    )
+                    scaling = (delta_t + delta_t2) if delta_t2 is not None else delta_t
+                    policy_loss2 = policy_loss2 + kld_i * scaling
                 elif args.use_train_a2a1_connect:
                     policy_loss2 = (
                         policy_loss2

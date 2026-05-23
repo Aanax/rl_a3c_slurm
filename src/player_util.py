@@ -23,7 +23,9 @@ class Agent(object):
         self.entropies = []
         self.entropies2 = []  # Actor2 entropies for hierarchical models
         self.actions = []
+        self.actions2 = []
         self.a1_logits = []
+        self.a2_logits = []
         self.a_21_logits = []
         self.x_restoreds = []
         self.kls = []
@@ -54,6 +56,7 @@ class Agent(object):
 
         a1_logits_i = None
         a_21_logits_i = None
+        action2 = None
         if len(model_output) == 4:
             value, logit, self.hx, self.cx = model_output
             x_restored = None
@@ -77,8 +80,13 @@ class Agent(object):
             value, logit, self.hx, self.cx, _, _, value2, logit2, a1_logits_i, a_21_logits_i = model_output
             x_restored = None
             kl = None
+            action2 = None
+        elif len(model_output) == 11:
+            value, logit, self.hx, self.cx, _, _, value2, logit2, a1_logits_i, a_21_logits_i, action2 = model_output
+            x_restored = None
+            kl = None
         else:
-            raise ValueError(f"Unexpected model output length: {len(model_output)}. Expected 4, 5, 6, 8, or 10.")
+            raise ValueError(f"Unexpected model output length: {len(model_output)}. Expected 4, 5, 6, 8, 10, or 11.")
         
         prob = F.softmax(logit, dim=1)
         log_prob = F.log_softmax(logit, dim=1)
@@ -93,10 +101,15 @@ class Agent(object):
             log_prob2 = F.log_softmax(logit2, dim=1)
             entropy2 = -(log_prob2 * prob2).sum(1)
             self.entropies2.append(entropy2)
-            action2 = prob2.multinomial(1).data
+            if action2 is None:
+                action2 = prob2.multinomial(1).data
+            else:
+                action2 = action2.data
             log_prob2 = log_prob2.gather(1, action2)
             self.log_probs2.append(log_prob2)
             self.values2.append(value2)
+            self.actions2.append(action2)
+            self.a2_logits.append(logit2)
 
         if a1_logits_i is not None:
             self.a1_logits.append(a1_logits_i)
@@ -213,7 +226,9 @@ class Agent(object):
         self.entropies = []
         self.entropies2 = []
         self.actions = []
+        self.actions2 = []
         self.a1_logits = []
+        self.a2_logits = []
         self.a_21_logits = []
         self.x_restoreds = []
         self.kls = []
