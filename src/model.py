@@ -1296,7 +1296,7 @@ class Hierarchial_interactor_zeroing(nn.Module):
         a2_logits = self.actor_linear2(s2_flat)*0
         V2 = self.critic_linear2(s2_flat)
 
-        a2_probs = F.softmax(a2_logits, dim=1)*0
+        a2_probs = F.softmax(a2_logits, dim=1)
         a2_sample = a2_probs.multinomial(1)
         a2_onehot = torch.zeros_like(a2_probs)*0
         a2_onehot.scatter_(1, a2_sample, 1.0)
