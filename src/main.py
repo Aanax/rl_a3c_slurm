@@ -62,6 +62,8 @@ args.save_model_steps = config.getint('DEFAULT', 'save_model_steps', fallback=0)
 args.train_version = config.get('DEFAULT', 'train_version', fallback='v1')
 args.separate_actor_deltas = config.getboolean('DEFAULT', 'separate_actor_deltas', fallback=False)
 args.use_train_a2a1_connect = config.getboolean('DEFAULT', 'use_train_a2a1_connect', fallback=False)
+args.use_beta_termination = config.getboolean('DEFAULT', 'use_beta_termination', fallback=False)
+args.beta_coef = config.getfloat('DEFAULT', 'beta_coef', fallback=1.0)
 
 # For list types
 gpu_ids_str = config.get('DEFAULT', 'gpu_ids', fallback='-1')

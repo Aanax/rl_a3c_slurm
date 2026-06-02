@@ -226,6 +226,10 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             if not player.done:
                 state = player.state
 
+                # Save option so the bootstrap-value forward does not
+                # perturb option timing of the real rollout (options models only).
+                saved_option = getattr(player.model, 'current_option', None)
+
                 if hasattr(args, 'model_type') and args.model_type == 'Hierarchial_memory_action_memrelu':
                     model_output = player.model(
                         state.unsqueeze(0), player.hx, player.cx, None, player.action_prev
@@ -234,6 +238,9 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     model_output = player.model(
                         state.unsqueeze(0), player.hx, player.cx, None
                     )
+
+                if hasattr(player.model, 'current_option'):
+                    player.model.current_option = saved_option
 
                 value = model_output[0]
                 R = value.detach()
@@ -248,7 +255,8 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     last_log_prob2 = last_log_prob2.gather(1, action2).detach()
 
             is_interactor = args.model_type in (
-                'Hierarchial_interactor', 'Hierarchial_interactor_zeroing'
+                'Hierarchial_interactor', 'Hierarchial_interactor_zeroing',
+                'Hierarchial_interactor_options'
             )
             player.values.append(R)
             
@@ -267,6 +275,8 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             policy_loss2 = 0
             value_loss2 = 0
             interactor_loss = 0
+            beta_loss = 0
+            use_beta = getattr(args, 'use_beta_termination', False) and len(player.betas) > 0
             interactor_running_target = None
             level2_running_target = None
             logprobs_summ = player.log_probs2[-1]
@@ -334,19 +344,30 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                         )
                         value_loss2 = value_loss2 + value_loss2_i
 
-                # For actor1: use only delta_t when separate_actor_deltas=True,
-                # otherwise combine delta_t + delta_t2 (original behaviour).
+                # Each TD error must be discounted by its OWN gamma: gae is the
+                # level-1 GAE (gamma), gae2 is the level-2 GAE (gamma2, accumulated
+                # above). Sum them for the actor-1 advantage instead of folding both
+                # deltas into a single gamma-decayed accumulator.
+                gae = gae * args.gamma * args.tau + delta_t
+
                 separate_deltas = getattr(args, 'separate_actor_deltas', False)
                 if delta_t2 is not None and not separate_deltas:
-                    gae = gae * args.gamma * args.tau + (delta_t + delta_t2)
+                    actor1_gae = gae + gae2
                 else:
-                    gae = gae * args.gamma * args.tau + delta_t
-                    
+                    actor1_gae = gae
+
                 policy_loss = (
                     policy_loss
-                    - (player.log_probs[i] * gae)
+                    - (player.log_probs[i] * actor1_gae)
                     - (args.entropy_coef * player.entropies[i])
                 )
+
+                # Option termination (beta) loss: beta(s2, a2) * (gae1 + gae2),
+                # detached advantage. Opposite sign of the option log-prob gradient:
+                # positive advantage lowers beta (keep option), negative raises it.
+                if use_beta and len(player.betas) > i:
+                    beta_adv = (gae + gae2) if delta_t2 is not None else gae
+                    beta_loss = beta_loss + player.betas[i] * beta_adv.detach()
                 
                 # Actor2 loss: KLD vs empirical a2 distribution (interactor models)
                 if is_interactor and len(player.a2_logits) > i and len(player.actions2) > i:
@@ -371,8 +392,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     kld_i = F.kl_div(
                         pred_log_dist, target_dist, reduction='batchmean'
                     )
-                    scaling = (delta_t + delta_t2) if delta_t2 is not None else delta_t
-                    policy_loss2 = policy_loss2 + kld_i * scaling
+                    policy_loss2 = policy_loss2 + kld_i * actor1_gae
                 elif args.use_train_a2a1_connect:
                     policy_loss2 = (
                         policy_loss2
@@ -385,7 +405,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                         - (args.entropy_coef * player.entropies2[i])
                     )
 
-                # Interactor loss: KLD(pi(a_21_target), pi(a_21)) * (delta1 + delta2)
+                # Interactor loss: KLD(pi(a_21_target), pi(a_21)) * actor1_gae
                 if is_interactor and len(player.a_21_logits) > i and len(player.actions) > i:
                     a1_logits_i = player.a1_logits[i]
                     a_21_logits_i = player.a_21_logits[i]
@@ -411,8 +431,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     kld_i = F.kl_div(
                         pred_log_dist, target_dist, reduction='batchmean'
                     )
-                    scaling = (delta_t + delta_t2) if delta_t2 is not None else delta_t
-                    interactor_loss = interactor_loss + kld_i * scaling
+                    interactor_loss = interactor_loss + kld_i * actor1_gae
 
             # Additional losses for VAE models (only compute if weights > 0)
             kld_loss = 0
@@ -429,11 +448,14 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             if is_hierarchical:
                 value_loss = value_loss + value_loss2
             
-            # Total loss: actor1 + actor2 + combined critic loss + interactor
+            # Option termination loss term (scaled), enabled via config flag
+            beta_term = (args.beta_coef * beta_loss) if use_beta else 0
+
+            # Total loss: actor1 + actor2 + combined critic loss + interactor + beta
             if is_interactor:
-                total_loss = policy_loss + policy_loss2 + 0.5 * value_loss + interactor_loss + kld_loss + restoration_loss
+                total_loss = policy_loss + policy_loss2 + 0.5 * value_loss + interactor_loss + kld_loss + restoration_loss + beta_term
             elif is_hierarchical:
-                total_loss = policy_loss + policy_loss2 + 0.5 * value_loss + kld_loss + restoration_loss
+                total_loss = policy_loss + policy_loss2 + 0.5 * value_loss + kld_loss + restoration_loss + beta_term
             else:
                 total_loss = policy_loss + 0.5 * value_loss + kld_loss + restoration_loss
 

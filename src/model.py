@@ -1160,6 +1160,118 @@ class Hierarchial_interactor(nn.Module):
 
         return V1, combined_logits, hx, cx, None, None, V2, a2_logits, a1_logits, a_21_logits, a2_sample
 
+
+    # Options-framework variant of Hierarchial_interactor (Precup et al. / option-critic style).
+
+    # Adds a per-option termination head beta(s2, .) off the level-2 critic encoder (one sigmoid per
+    # option). A sampled option (macro-action a2) PERSISTS across timesteps: every step we sample
+    # Bernoulli(beta[active_option]); on 1 the option terminates and a fresh option is sampled, on 0 it
+    # continues. beta is trained (in train.py) with Loss_beta = beta(s2, a2) * (gae1 + gae2), the
+    # sign-flipped counterpart of the option-selection gradient.
+
+class Hierarchial_interactor_options(nn.Module):
+    def __init__(self, num_inputs, action_space, args):
+        super(Hierarchial_interactor_options, self).__init__()
+        self.hidden_size = args.hidden_size
+        self.monitor_s = getattr(args, 'monitor_s', False)
+        if self.monitor_s:
+            self.s_values = []
+
+        num_outputs = action_space.n
+        self.num_outputs = num_outputs
+        self.num_options = 8
+
+        use_rmsnorm = getattr(args, 'use_rmsnorm', False)
+        self.level1_encoder = EncoderRules234(num_inputs, latent_dim_conv=64, use_rmsnorm=use_rmsnorm)
+        self.level2_encoder = EncoderRules234_2()
+
+        self.critic_linear2 = nn.Linear(32*4*4, 1)
+        self.actor_linear2 = nn.Linear(32*4*4, self.num_options)
+        self.beta_linear = nn.Linear(32*4*4, self.num_options)
+
+        self.interactor = nn.Linear(self.num_options, num_outputs)
+
+        self.critic_linear = nn.Linear(64*4*4, 1)
+        self.actor_linear = nn.Linear(64*4*4, num_outputs)
+
+        for linear in [self.critic_linear2, self.actor_linear2]:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
+            std = 1.0 / math.sqrt(fan_in)
+            nn.init.normal_(linear.weight, mean=0.0, std=std)
+            linear.bias.data.fill_(0)
+
+        for linear in [self.critic_linear, self.actor_linear]:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
+            std = 1.0 / math.sqrt(fan_in)
+            nn.init.normal_(linear.weight, mean=0.0, std=std)
+            linear.bias.data.fill_(0)
+
+        self.actor_linear.weight.data.mul_(0.01)
+        self.critic_linear.weight.data.mul_(1.0)
+
+        fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.interactor.weight)
+        std = 0.01 / math.sqrt(fan_in)
+        nn.init.normal_(self.interactor.weight, mean=0.0, std=std)
+        self.interactor.bias.data.fill_(0)
+
+        # beta head: small weights, zero bias => initial termination prob ~= 0.5 (sigmoid(0))
+        fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.beta_linear.weight)
+        std = 1.0 / math.sqrt(fan_in)
+        nn.init.normal_(self.beta_linear.weight, mean=0.0, std=std)
+        self.beta_linear.weight.data.mul_(0.01)
+        self.beta_linear.bias.data.fill_(0.0)
+
+        self.current_option = None
+
+        self.train()
+
+    def forward(self, inputs, hx, cx, mem=None):
+        s, _, _, _ = self.level1_encoder(inputs)
+
+        if self.monitor_s:
+            self.s_values.append(s.detach().cpu())
+
+        hx = torch.Tensor([0])
+        cx = torch.Tensor([0])
+
+        s2 = s
+        s2, _, _, _ = self.level2_encoder(s2)
+        s2_flat = s2.view(s2.size(0), -1)
+        a2_logits = self.actor_linear2(s2_flat)
+        V2 = self.critic_linear2(s2_flat)
+        beta = torch.sigmoid(self.beta_linear(s2_flat))
+
+        a2_probs = F.softmax(a2_logits, dim=1)
+
+        # option same / end
+        if self.current_option is None or self.current_option.size(0) != a2_probs.size(0):
+            a2_sample = a2_probs.multinomial(1)
+        else:
+            beta_active = (beta.detach() * self.current_option).sum(dim=1, keepdim=True)
+            terminate = torch.bernoulli(beta_active)
+            prev_idx = self.current_option.argmax(dim=1, keepdim=True)
+            new_idx = a2_probs.multinomial(1)
+            a2_sample = torch.where(terminate.bool(), new_idx, prev_idx)
+
+        a2_onehot = torch.zeros_like(a2_probs)
+        a2_onehot.scatter_(1, a2_sample, 1.0)
+        self.current_option = a2_onehot.detach()
+
+        # beta for active option, WITH grad for termination loss)
+        beta_active_grad = (beta * a2_onehot).sum(dim=1, keepdim=True)
+
+        a_21_logits = self.interactor(a2_onehot)
+
+        s_flat = s.view(s.size(0), -1)
+        s_flat = F.relu(s_flat)
+        a1_logits = self.actor_linear(s_flat)
+        V1 = self.critic_linear(s_flat)
+
+        combined_logits = a1_logits + a_21_logits.detach()
+
+        return (V1, combined_logits, hx, cx, None, None, V2, a2_logits,
+                a1_logits, a_21_logits, a2_sample, beta_active_grad)
+
 class Hierarchial_interactor_zeroing_(nn.Module):
     def __init__(self, num_inputs, action_space, args):
         super(Hierarchial_interactor_zeroing, self).__init__()

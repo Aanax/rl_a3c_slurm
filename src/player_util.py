@@ -27,6 +27,7 @@ class Agent(object):
         self.a1_logits = []
         self.a2_logits = []
         self.a_21_logits = []
+        self.betas = []  # active-option termination coefficients beta(s2, a2)
         self.x_restoreds = []
         self.kls = []
         self.states = []
@@ -85,8 +86,13 @@ class Agent(object):
             value, logit, self.hx, self.cx, _, _, value2, logit2, a1_logits_i, a_21_logits_i, action2 = model_output
             x_restored = None
             kl = None
+        elif len(model_output) == 12:
+            value, logit, self.hx, self.cx, _, _, value2, logit2, a1_logits_i, a_21_logits_i, action2, beta_active = model_output
+            x_restored = None
+            kl = None
+            self.betas.append(beta_active)
         else:
-            raise ValueError(f"Unexpected model output length: {len(model_output)}. Expected 4, 5, 6, 8, 10, or 11.")
+            raise ValueError(f"Unexpected model output length: {len(model_output)}. Expected 4, 5, 6, 8, 10, 11, or 12.")
         
         prob = F.softmax(logit, dim=1)
         log_prob = F.log_softmax(logit, dim=1)
@@ -142,6 +148,9 @@ class Agent(object):
                 self.model.running_mem = torch.zeros_like(self.model.running_mem)
             if hasattr(self.model, 'prev_x_conv'):
                 self.model.prev_x_conv = None
+            # Reset persisted option so a fresh option is sampled next episode
+            if hasattr(self.model, 'current_option'):
+                self.model.current_option = None
 
         self.eps_len += 1
         self.reward = max(min(self.reward, 1), -1)
@@ -172,6 +181,8 @@ class Agent(object):
                         self.model.running_mem = torch.zeros_like(self.model.running_mem)
                     if hasattr(self.model, 'prev_x_conv'):
                         self.model.prev_x_conv = None
+                    if hasattr(self.model, 'current_option'):
+                        self.model.current_option = None
                 except:
                     pass
                 # Reset action_prev when episode ends
@@ -230,6 +241,7 @@ class Agent(object):
         self.a1_logits = []
         self.a2_logits = []
         self.a_21_logits = []
+        self.betas = []
         self.x_restoreds = []
         self.kls = []
         self.states = []
