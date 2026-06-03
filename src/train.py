@@ -362,9 +362,8 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     - (args.entropy_coef * player.entropies[i])
                 )
 
-                # Option termination (beta) loss: beta(s2, a2) * (gae1 + gae2),
-                # detached advantage. Opposite sign of the option log-prob gradient:
-                # positive advantage lowers beta (keep option), negative raises it.
+                # Option termination (beta) loss: beta(s2, o_prev) * advantage (detached).
+                # beta_active_grad uses the option from the previous step (see model forward).
                 if use_beta and len(player.betas) > i:
                     beta_adv = (gae + gae2) if delta_t2 is not None else gae
                     beta_loss = beta_loss + player.betas[i] * beta_adv.detach()

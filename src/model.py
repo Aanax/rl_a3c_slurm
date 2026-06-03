@@ -1166,7 +1166,7 @@ class Hierarchial_interactor(nn.Module):
     # Adds a per-option termination head beta(s2, .) off the level-2 critic encoder (one sigmoid per
     # option). A sampled option (macro-action a2) PERSISTS across timesteps: every step we sample
     # Bernoulli(beta[active_option]); on 1 the option terminates and a fresh option is sampled, on 0 it
-    # continues. beta is trained (in train.py) with Loss_beta = beta(s2, a2) * (gae1 + gae2), the
+    # continues. beta is trained (in train.py) with Loss_beta = beta(s2, o_prev) * (gae1 + gae2),
     # sign-flipped counterpart of the option-selection gradient.
 
 class Hierarchial_interactor_options(nn.Module):
@@ -1243,13 +1243,16 @@ class Hierarchial_interactor_options(nn.Module):
 
         a2_probs = F.softmax(a2_logits, dim=1)
 
+        # Option active at the start of this step (from the previous step).
+        prev_option = self.current_option
+
         # option same / end
-        if self.current_option is None or self.current_option.size(0) != a2_probs.size(0):
+        if prev_option is None or prev_option.size(0) != a2_probs.size(0):
             a2_sample = a2_probs.multinomial(1)
         else:
-            beta_active = (beta.detach() * self.current_option).sum(dim=1, keepdim=True)
+            beta_active = (beta.detach() * prev_option).sum(dim=1, keepdim=True)
             terminate = torch.bernoulli(beta_active)
-            prev_idx = self.current_option.argmax(dim=1, keepdim=True)
+            prev_idx = prev_option.argmax(dim=1, keepdim=True)
             new_idx = a2_probs.multinomial(1)
             a2_sample = torch.where(terminate.bool(), new_idx, prev_idx)
 
@@ -1257,8 +1260,14 @@ class Hierarchial_interactor_options(nn.Module):
         a2_onehot.scatter_(1, a2_sample, 1.0)
         self.current_option = a2_onehot.detach()
 
-        # beta for active option, WITH grad for termination loss)
-        beta_active_grad = (beta * a2_onehot).sum(dim=1, keepdim=True)
+        # Termination loss grad: beta(s_t, o_{t-1}) only (same o as Bernoulli sample).
+        # No loss on the first step of an episode (no prior option / termination event).
+        if prev_option is not None and prev_option.size(0) == a2_probs.size(0):
+            beta_active_grad = (beta * prev_option).sum(dim=1, keepdim=True)
+        else:
+            beta_active_grad = torch.zeros(
+                beta.size(0), 1, device=beta.device, dtype=beta.dtype
+            )
 
         a_21_logits = self.interactor(a2_onehot)
 
