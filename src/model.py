@@ -1282,7 +1282,7 @@ class Hierarchial_interactor_options(nn.Module):
                 a1_logits, a_21_logits, a2_sample, beta_active_grad)
 
 
-class Hierarchial_interactor_options_zeroing(nn.Module):
+class Hierarchial_interactor_options_zeroing_(nn.Module):
     """Options variant with level-2 actor and interactor zeroed; only level-1 actor plays."""
 
     def __init__(self, num_inputs, action_space, args):
@@ -1390,6 +1390,24 @@ class Hierarchial_interactor_options_zeroing(nn.Module):
 
         return (V1, combined_logits, hx, cx, None, None, V2, a2_logits,
                 a1_logits, a_21_logits, a2_sample, beta_active_grad)
+
+
+class Hierarchial_interactor_options_zeroing(Hierarchial_interactor_options):
+    """Options variant with interactor (a21) zeroed; a1 and a2 play normally."""
+
+    def forward(self, inputs, hx, cx, mem=None):
+        (
+            V1, _, hx, cx, _, _, V2, a2_logits,
+            a1_logits, a_21_logits, a2_sample, beta_active_grad,
+        ) = super().forward(inputs, hx, cx, mem)
+
+        a_21_logits = torch.zeros_like(a_21_logits)
+        combined_logits = a1_logits + a_21_logits.detach()
+
+        return (
+            V1, combined_logits, hx, cx, None, None, V2, a2_logits,
+            a1_logits, a_21_logits, a2_sample, beta_active_grad,
+        )
 
 
 class Hierarchial_interactor_zeroing_(nn.Module):
