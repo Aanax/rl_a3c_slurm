@@ -256,7 +256,8 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
 
             is_interactor = args.model_type in (
                 'Hierarchial_interactor', 'Hierarchial_interactor_zeroing',
-                'Hierarchial_interactor_options'
+                'Hierarchial_interactor_options',
+                'Hierarchial_interactor_options_zeroing',
             )
             player.values.append(R)
             
