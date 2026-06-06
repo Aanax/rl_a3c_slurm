@@ -258,6 +258,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 'Hierarchial_interactor', 'Hierarchial_interactor_zeroing',
                 'Hierarchial_interactor_options',
                 'Hierarchial_interactor_options_zeroing',
+                'Hierarchial_interactor_options_zeroing2',
             )
             player.values.append(R)
             

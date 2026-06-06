@@ -80,7 +80,9 @@ def parse_args():
     p.add_argument('--render-freq', type=int, default=1,
                    help='Frequency to render (default: 1)')
     p.add_argument('--zero-a2', action='store_true',
-                   help='Append _zeroing suffix to model_type (zeros a2 input to actor)')
+                   help='Append _zeroing suffix (options: zero a21; a1+a2 play normally)')
+    p.add_argument('--zero-a1', action='store_true',
+                   help='Append _zeroing2 suffix (options: zero a1; a21+a2 play normally)')
     
     cli = p.parse_args()
 
@@ -119,6 +121,7 @@ def parse_args():
     args.render_freq = cli.render_freq
     args.gpu_id = cli.gpu_id
     args.zero_a2 = cli.zero_a2
+    args.zero_a1 = cli.zero_a1
 
     return args
 
@@ -135,8 +138,9 @@ def load_model_and_env(args):
 
     num_inputs = env.observation_space.shape[0]
 
-    # If --zero-a2 is specified, append '_zeroing' suffix to model type
-    if getattr(args, 'zero_a2', False):
+    if getattr(args, 'zero_a1', False):
+        args.model_type = args.model_type + '_zeroing2'
+    elif getattr(args, 'zero_a2', False):
         args.model_type = args.model_type + '_zeroing'
     
     model_cls = getattr(model_module, args.model_type)
@@ -283,7 +287,12 @@ def save_eval_results(all_episodes_data, args):
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H:%M:%S')
         model_name = os.path.basename(args.model_path).split('.')[0]
         
-        zeroing_suffix = "_zeroing" if getattr(args, 'zero_a2', False) else ""
+        if getattr(args, 'zero_a1', False):
+            zeroing_suffix = "_zeroing2"
+        elif getattr(args, 'zero_a2', False):
+            zeroing_suffix = "_zeroing"
+        else:
+            zeroing_suffix = ""
         
         if args.on_cluster:
             # On cluster: save to logs/experiment_name/Eval_.../
