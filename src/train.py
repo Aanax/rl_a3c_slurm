@@ -260,6 +260,16 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 'Hierarchial_interactor_options_zeroing',
                 'Hierarchial_interactor_options_zeroing2',
             )
+            # Bootstrap logits at step H (i+1 when reversed loop starts at i=H-1).
+            bootstrap_a2_logits = None
+            bootstrap_interactor_logits = None
+            if model_output is not None:
+                if len(model_output) >= 8:
+                    bootstrap_a2_logits = model_output[7]
+                if len(model_output) >= 10:
+                    bootstrap_interactor_logits = (
+                        model_output[8].detach() + model_output[9]
+                    )
             player.values.append(R)
             
             # Check if model is hierarchical (has V2 and a2 outputs)
@@ -354,7 +364,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
 
                 separate_deltas = getattr(args, 'separate_actor_deltas', False)
                 if delta_t2 is not None and not separate_deltas:
-                    actor1_gae = gae + gae2
+                    actor1_gae = (gae + gae2).detach()
                 else:
                     actor1_gae = gae
 
@@ -375,8 +385,13 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     a2_logits_i = player.a2_logits[i]
 
                     if level2_running_target is None:
+                        init_a2_logits = (
+                            bootstrap_a2_logits
+                            if bootstrap_a2_logits is not None
+                            else a2_logits_i
+                        )
                         level2_running_target = F.softmax(
-                            a2_logits_i, dim=1
+                            init_a2_logits, dim=1
                         ).detach()
 
                     sampled_target = sampled_action_target(
@@ -412,8 +427,14 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     a_21_logits_i = player.a_21_logits[i]
 
                     if interactor_running_target is None:
+                        if bootstrap_interactor_logits is not None:
+                            init_interactor_logits = bootstrap_interactor_logits
+                        else:
+                            init_interactor_logits = (
+                                a1_logits_i.detach() + a_21_logits_i
+                            )
                         interactor_running_target = F.softmax(
-                            a1_logits_i.detach() + a_21_logits_i, dim=1
+                            init_interactor_logits, dim=1
                         ).detach()
 
                     sampled_target = sampled_action_target(
