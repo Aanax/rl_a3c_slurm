@@ -9,94 +9,26 @@ from environment import atari_env
 from utils import ensure_shared_grads
 import model
 from player_util import Agent
-from torch.autograd import Variable
 import time
 import pickle
 import csv
-import os
 
 
 def compute_level2_loss_v1(args, player, i, gae2, R2):
-    """
-    v1: orig algo for level 2 loss.
-    
-    r2_i = V1_i * (1 - gamma1)
-    R2 = gamma2 * R2 + r2_i
-    advantage2 = R2 - V2[i]
-    """
-    # r2_i = V1_i (r for critic2 is V1)
     r2_i = player.values[i].detach() * (1 - args.gamma)
     R2 = args.gamma2 * R2 + r2_i
     advantage2 = R2 - player.values2[i]
     value_loss2_i = 0.5 * advantage2.pow(2)
-    
-    # Generalized Advantage Estimation for level 2
+
     delta_t2 = (
         r2_i
         + args.gamma2 * player.values2[i + 1].data
         - player.values2[i].data
     )
-    
+
     gae2 = gae2 * args.gamma2 * args.tau + delta_t2
-    
+
     return advantage2, value_loss2_i, delta_t2, gae2, R2
-
-
-def compute_level2_loss_a2a1_connect(args, player, i, gae2, R2, logprobs_summ):
-    """
-    v1: orig algo for level 2 loss.
-    
-    r2_i = V1_i * (1 - gamma1)
-    R2 = gamma2 * R2 + r2_i
-    advantage2 = R2 - V2[i]
-    """
-    # r2_i = V1_i (r for critic2 is V1)
-    r2_i = player.values[i].detach() * (1 - args.gamma)
-    R2 = args.gamma2 * R2 + r2_i
-    advantage2 = R2 - player.values2[i]
-    value_loss2_i = 0.5 * advantage2.pow(2)
-
-
-    logprobs_summ = logprobs_summ*args.gamma + player.log_probs2[i]*(1-args.gamma)
-    
-    # Generalized Advantage Estimation for level 2
-    delta_t2 = (
-        r2_i
-        + args.gamma2 * player.values2[i + 1].data
-        - player.values2[i].data
-    )
-    
-    gae2 = gae2 * args.gamma2 * args.tau + delta_t2
-    
-    return advantage2, value_loss2_i, delta_t2, gae2, R2, logprobs_summ
-
-
-def compute_level2_loss_v2(args, player, i, r2, V2Target, gae2):
-    """
-    v2: new algo for level 2 loss.
-    
-    r2 := g1 * r2 + (1 - g1) * r[i]
-    V2Target := V2Target * g2 + r2
-    advantage2 := V2Target.detach - V2[i]
-    """
-    # r2 = g1 * r2 + (1 - g1) * r[i]
-    r2 = args.gamma * r2 + (1 - args.gamma) * player.rewards[i]
-    # V2Target := V2Target * g2 + r2
-    V2Target = V2Target * args.gamma2 + r2
-    # a2 = V2Target.detach - V2[i]
-    advantage2 = V2Target.detach() - player.values2[i]
-    value_loss2_i = 0.5 * advantage2.pow(2)
-    
-    # Use V1(1-g1) for r2_i and GAE for level 2
-    r2_i = player.values[i].detach() * (1 - args.gamma)
-    delta_t2 = (
-        r2_i
-        + args.gamma2 * player.values2[i + 1].data
-        - player.values2[i].data
-    )
-    gae2 = gae2 * args.gamma2 * args.tau + delta_t2
-    
-    return advantage2, value_loss2_i, delta_t2, gae2, r2, V2Target
 
 
 def sampled_action_target(action, logits):
@@ -121,7 +53,9 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
     env.seed(args.seed + rank)
     player = Agent(None, env, args, None)
     player.gpu_id = gpu_id
-    player.model = getattr(model, args.model_type)(player.env.observation_space.shape[0], player.env.action_space, args)
+    player.model = model.Hierarchial_interactor_options(
+        player.env.observation_space.shape[0], player.env.action_space, args
+    )
 
     player.state = player.env.reset()
     if gpu_id >= 0:
@@ -132,7 +66,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
         player.state = torch.from_numpy(player.state).float()
     player.model.train()
     if len(args.distributed_step_size) > 0:
-        num_steps = args.distributed_step_size[rank%len(args.distributed_step_size)]
+        num_steps = args.distributed_step_size[rank % len(args.distributed_step_size)]
     else:
         num_steps = args.num_steps
 
@@ -174,7 +108,6 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             if player.done:
                 game_count += 1
                 if args.monitor_s and (game_count % args.monitor_s_save_interval == 0 or game_count == 1):
-                    # Save s values for this game
                     s_data = {
                         'game': game_count,
                         'rank': rank,
@@ -186,17 +119,11 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     print(f"Saving s monitoring data to: {save_path}")
                     with open(save_path, 'wb') as f:
                         pickle.dump(s_data, f)
-                    # Check if file was saved successfully
                     if os.path.exists(save_path):
                         print(f"S monitoring data saved successfully: {save_path}")
                     else:
                         print(f"ERROR: Failed to save s monitoring data to: {save_path}")
-                    # Clear s values for next games
                 player.model.s_values = []
-
-                # # Reset memory for models with memory when starting new episode
-                # if hasattr(player.model, 'reset_memory'):
-                #     player.model.reset_memory()
 
                 player.eps_len = 0
                 state = player.env.reset()
@@ -212,75 +139,39 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     gae = torch.zeros(1, 1).cuda()
                     R2 = torch.zeros(1, 1).cuda()
                     gae2 = torch.zeros(1, 1).cuda()
-                    last_log_prob2 = torch.zeros(1, 1).cuda()
-
             else:
                 R = torch.zeros(1, 1)
                 gae = torch.zeros(1, 1)
                 R2 = torch.zeros(1, 1)
                 gae2 = torch.zeros(1, 1)
-                last_log_prob2 = torch.zeros(1, 1)
-                
-                
+
             model_output = None
             if not player.done:
                 state = player.state
 
-                # Save option so the bootstrap-value forward does not
-                # perturb option timing of the real rollout (options models only).
-                saved_option = getattr(player.model, 'current_option', None)
+                saved_option = player.model.current_option
 
-                if hasattr(args, 'model_type') and args.model_type == 'Hierarchial_memory_action_memrelu':
-                    model_output = player.model(
-                        state.unsqueeze(0), player.hx, player.cx, None, player.action_prev
-                    )
-                else:
-                    model_output = player.model(
-                        state.unsqueeze(0), player.hx, player.cx, None
-                    )
+                model_output = player.model(
+                    state.unsqueeze(0), player.hx, player.cx, None
+                )
 
-                if hasattr(player.model, 'current_option'):
-                    player.model.current_option = saved_option
+                player.model.current_option = saved_option
 
                 value = model_output[0]
                 R = value.detach()
-                # For hierarchical models, also get V2
-                if len(model_output) >= 8:
-                    value2 = model_output[6]
-                    R2 = value2.detach()
-                    logit2 = model_output[7]
-                    prob2 = F.softmax(logit2, dim=1)
-                    last_log_prob2 = F.log_softmax(logit2, dim=1)
-                    action2 = prob2.multinomial(1).data # note: may sample differently in reality
-                    last_log_prob2 = last_log_prob2.gather(1, action2).detach()
+                value2 = model_output[6]
+                R2 = value2.detach()
 
-            is_interactor = args.model_type in (
-                'Hierarchial_interactor', 'Hierarchial_interactor_zeroing',
-                'Hierarchial_interactor_options',
-                'Hierarchial_interactor_options_zeroing',
-                'Hierarchial_interactor_options_zeroing2',
-            )
-            # Bootstrap logits at step H (i+1 when reversed loop starts at i=H-1).
+            player.values.append(R)
+            player.values2.append(R2)
+
             bootstrap_a2_logits = None
             bootstrap_interactor_logits = None
             if model_output is not None:
-                if len(model_output) >= 8:
-                    bootstrap_a2_logits = model_output[7]
-                if len(model_output) >= 10:
-                    bootstrap_interactor_logits = (
-                        model_output[8].detach() + model_output[9]
-                    )
-            player.values.append(R)
-            
-            # Check if model is hierarchical (has V2 and a2 outputs)
-            # If values2 was populated during action_train, model is hierarchical
-            is_hierarchical = len(player.values2) > 0
-            if is_hierarchical:
-                # Append final R2 to match the final R we just appended
-                # If episode is done, R2 remains zeros (bootstrap value)
-                player.values2.append(R2)
-            if args.use_train_a2a1_connect:
-                player.log_probs2.append(last_log_prob2)
+                bootstrap_a2_logits = model_output[7]
+                bootstrap_interactor_logits = (
+                    model_output[8].detach() + model_output[9]
+                )
 
             policy_loss = 0
             value_loss = 0
@@ -288,85 +179,31 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             value_loss2 = 0
             interactor_loss = 0
             beta_loss = 0
-            use_beta = getattr(args, 'use_beta_termination', False) and len(player.betas) > 0
             interactor_running_target = None
             level2_running_target = None
-            logprobs_summ = player.log_probs2[-1]
-            
-            # Determine which train version to use for level 2 calculations
-            train_version = getattr(args, 'train_version', 'v1')
-            use_train_v2 = (train_version == 'v2')
-            
-            # trainv2: init r2 and V2Target at the start of the batch
-            if is_hierarchical and use_train_v2:
-                # r2 = (1-g1)*V1[H].detach() - w last value (botstrap)
-                r2 = (1 - args.gamma) * player.values[-1].detach()
-                # V2Target = V2[H].detach() - use the last value2 (bootstrap)
-                V2Target = player.values2[-1].detach()
-            
+
             for i in reversed(range(len(player.rewards))):
                 R = args.gamma * R + player.rewards[i]
                 advantage = R - player.values[i]
                 value_loss = value_loss + 0.5 * advantage.pow(2)
 
-                # Generalized Advantage Estimataion 1
                 delta_t = (
                     player.rewards[i]
                     + args.gamma * player.values[i + 1].data
                     - player.values[i].data
                 )
 
-                # Level 2 loss
-                delta_t2 = None
-                if is_hierarchical and len(player.values2) > i and len(player.log_probs2) > i:
-                    if args.use_train_a2a1_connect:
-                        (
-                            advantage2,
-                            value_loss2_i,
-                            delta_t2,
-                            gae2,
-                            R2,
-                            logprobs_summ
-                        ) = compute_level2_loss_a2a1_connect(
-                            args, player, i, gae2, R2, logprobs_summ
-                        )
-                        value_loss2 = value_loss2 + value_loss2_i
+                (
+                    advantage2,
+                    value_loss2_i,
+                    delta_t2,
+                    gae2,
+                    R2
+                ) = compute_level2_loss_v1(args, player, i, gae2, R2)
+                value_loss2 = value_loss2 + value_loss2_i
 
-                    elif use_train_v2:
-                        (
-                            advantage2,
-                            value_loss2_i,
-                            delta_t2,
-                            gae2,
-                            r2,
-                            V2Target
-                        ) = compute_level2_loss_v2(
-                            args, player, i, r2, V2Target, gae2
-                        )
-                        value_loss2 = value_loss2 + value_loss2_i
-                    else:
-                        (
-                            advantage2,
-                            value_loss2_i,
-                            delta_t2,
-                            gae2,
-                            R2
-                        ) = compute_level2_loss_v1(
-                            args, player, i, gae2, R2
-                        )
-                        value_loss2 = value_loss2 + value_loss2_i
-
-                # Each TD error must be discounted by its OWN gamma: gae is the
-                # level-1 GAE (gamma), gae2 is the level-2 GAE (gamma2, accumulated
-                # above). Sum them for the actor-1 advantage instead of folding both
-                # deltas into a single gamma-decayed accumulator.
                 gae = gae * args.gamma * args.tau + delta_t
-
-                separate_deltas = getattr(args, 'separate_actor_deltas', False)
-                if delta_t2 is not None and not separate_deltas:
-                    actor1_gae = (gae + gae2).detach()
-                else:
-                    actor1_gae = gae
+                actor1_gae = (gae + gae2).detach()
 
                 policy_loss = (
                     policy_loss
@@ -374,124 +211,80 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     - (args.entropy_coef * player.entropies[i])
                 )
 
-                # Option termination (beta) loss: beta(s2, o_prev) * advantage (detached).
-                # beta_active_grad uses the option from the previous step (see model forward).
-                if use_beta and len(player.betas) > i:
-                    beta_adv = (gae + gae2) if delta_t2 is not None else gae
-                    beta_loss = beta_loss + player.betas[i] * beta_adv.detach()
-                
-                # Actor2 loss: KLD vs empirical a2 distribution (interactor models)
-                if is_interactor and len(player.a2_logits) > i and len(player.actions2) > i:
-                    a2_logits_i = player.a2_logits[i]
+                beta_adv = (gae + gae2).detach()
+                beta_loss = beta_loss + player.betas[i] * beta_adv
 
-                    if level2_running_target is None:
-                        init_a2_logits = (
-                            bootstrap_a2_logits
-                            if bootstrap_a2_logits is not None
-                            else a2_logits_i
+                a2_logits_i = player.a2_logits[i]
+
+                if level2_running_target is None:
+                    init_a2_logits = (
+                        bootstrap_a2_logits
+                        if bootstrap_a2_logits is not None
+                        else a2_logits_i
+                    )
+                    level2_running_target = F.softmax(
+                        init_a2_logits, dim=1
+                    ).detach()
+
+                sampled_target = sampled_action_target(
+                    player.actions2[i],
+                    a2_logits_i,
+                )
+                level2_running_target = (
+                    args.gamma * level2_running_target
+                    + (1 - args.gamma) * sampled_target
+                ).detach()
+
+                target_dist = level2_running_target
+                pred_log_dist = F.log_softmax(a2_logits_i, dim=1)
+                kld_i = F.kl_div(
+                    pred_log_dist, target_dist, reduction='batchmean'
+                )
+                policy_loss2 = policy_loss2 + kld_i * actor1_gae
+
+                a1_logits_i = player.a1_logits[i]
+                a_21_logits_i = player.a_21_logits[i]
+
+                if interactor_running_target is None:
+                    if bootstrap_interactor_logits is not None:
+                        init_interactor_logits = bootstrap_interactor_logits
+                    else:
+                        init_interactor_logits = (
+                            a1_logits_i.detach() + a_21_logits_i
                         )
-                        level2_running_target = F.softmax(
-                            init_a2_logits, dim=1
-                        ).detach()
-
-                    sampled_target = sampled_action_target(
-                        player.actions2[i],
-                        a2_logits_i,
-                    )
-                    level2_running_target = (
-                        args.gamma * level2_running_target
-                        + (1 - args.gamma) * sampled_target
+                    interactor_running_target = F.softmax(
+                        init_interactor_logits, dim=1
                     ).detach()
 
-                    target_dist = level2_running_target
-                    pred_log_dist = F.log_softmax(a2_logits_i, dim=1)
-                    kld_i = F.kl_div(
-                        pred_log_dist, target_dist, reduction='batchmean'
-                    )
-                    policy_loss2 = policy_loss2 + kld_i * actor1_gae
-                elif args.use_train_a2a1_connect:
-                    policy_loss2 = (
-                        policy_loss2
-                        + 0.5*((player.log_probs2[i] - logprobs_summ)**2) * gae
-                    )
-                elif is_hierarchical and len(player.log_probs2) > i:
-                    policy_loss2 = (
-                        policy_loss2
-                        - (player.log_probs2[i] * gae2)
-                        - (args.entropy_coef * player.entropies2[i])
-                    )
+                sampled_target = sampled_action_target(
+                    player.actions[i],
+                    a_21_logits_i,
+                )
+                interactor_running_target = (
+                    args.gamma * interactor_running_target
+                    + (1 - args.gamma) * sampled_target
+                ).detach()
 
-                # Interactor loss: KLD(pi(a_21_target), pi(a_21)) * actor1_gae
-                if is_interactor and len(player.a_21_logits) > i and len(player.actions) > i:
-                    a1_logits_i = player.a1_logits[i]
-                    a_21_logits_i = player.a_21_logits[i]
+                target_dist = interactor_running_target
+                pred_log_dist = F.log_softmax(
+                    a1_logits_i.detach() + a_21_logits_i, dim=1
+                )
+                kld_i = F.kl_div(
+                    pred_log_dist, target_dist, reduction='batchmean'
+                )
+                interactor_loss = interactor_loss + kld_i * actor1_gae
 
-                    if interactor_running_target is None:
-                        if bootstrap_interactor_logits is not None:
-                            init_interactor_logits = bootstrap_interactor_logits
-                        else:
-                            init_interactor_logits = (
-                                a1_logits_i.detach() + a_21_logits_i
-                            )
-                        interactor_running_target = F.softmax(
-                            init_interactor_logits, dim=1
-                        ).detach()
-
-                    sampled_target = sampled_action_target(
-                        player.actions[i],
-                        a_21_logits_i,
-                    )
-                    interactor_running_target = (
-                        args.gamma * interactor_running_target
-                        + (1 - args.gamma) * sampled_target
-                    ).detach()
-
-                    target_dist = interactor_running_target
-                    pred_log_dist = F.log_softmax(
-                        a1_logits_i.detach() + a_21_logits_i, dim=1
-                    )
-                    kld_i = F.kl_div(
-                        pred_log_dist, target_dist, reduction='batchmean'
-                    )
-                    interactor_loss = interactor_loss + kld_i * actor1_gae
-
-            # Additional losses for VAE models (only compute if weights > 0)
-            kld_loss = 0
-            restoration_loss = 0
-            if args.w_kld_loss > 0 or args.w_restoration_loss > 0:
-                batch_size = len(player.rewards)
-                for i in range(len(player.rewards)):
-                    if args.w_kld_loss > 0 and len(player.kls) > i:
-                        kld_loss += args.w_kld_loss * player.kls[i]
-                    if args.w_restoration_loss > 0 and len(player.x_restoreds) > i:
-                        restoration_loss += args.w_restoration_loss * (player.x_restoreds[i] - player.states[i].detach()).pow(2).mean()
-
-            # Combine critic1 loss with critic2 loss
-            if is_hierarchical:
-                value_loss = value_loss + value_loss2
-            
-            # Option termination loss term (scaled), enabled via config flag
-            beta_term = (args.beta_coef * beta_loss) if use_beta else 0
-
-            # Total loss: actor1 + actor2 + combined critic loss + interactor + beta
-            if is_interactor:
-                total_loss = policy_loss + policy_loss2 + 0.5 * value_loss + interactor_loss + kld_loss + restoration_loss + beta_term
-            elif is_hierarchical:
-                total_loss = policy_loss + policy_loss2 + 0.5 * value_loss + kld_loss + restoration_loss + beta_term
-            else:
-                total_loss = policy_loss + 0.5 * value_loss + kld_loss + restoration_loss
+            value_loss = value_loss + value_loss2
+            beta_term = args.beta_coef * beta_loss
+            total_loss = (
+                policy_loss + policy_loss2 + 0.5 * value_loss
+                + interactor_loss + beta_term
+            )
 
             player.model.zero_grad()
             total_loss.backward()
             ensure_shared_grads(player.model, shared_model, gpu=gpu_id >= 0)
             optimizer.step()
-
-            # Reset memory for models with memory when starting new batch
-            if hasattr(player.model, 'reset_memory'):
-                player.model.reset_memory()
-
-            if hasattr(shared_model, 'orthogonalize_conv4'):
-                shared_model.orthogonalize_conv4()
 
             if args.save_model_steps > 0 and frames_total.value // args.save_model_steps > last_save and rank == 0:
                 last_save = frames_total.value // args.save_model_steps
@@ -499,7 +292,6 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 os.makedirs(log_dir_path, exist_ok=True)
                 torch.save(shared_model.state_dict(), f"{log_dir_path}model_{frames_total.value}.dat")
 
-            # Save losses to CSV if monitoring is enabled
             if args.monitor_losses:
                 batch_count += 1
                 with open(loss_csv_path, 'a', newline='') as csvfile:
@@ -508,8 +300,8 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                         batch_count,
                         policy_loss.item(),
                         (0.5 * value_loss).item(),
-                        kld_loss.item() if isinstance(kld_loss, torch.Tensor) else kld_loss,
-                        restoration_loss.item() if isinstance(restoration_loss, torch.Tensor) else restoration_loss
+                        0,
+                        0,
                     ])
 
             player.clear_actions()

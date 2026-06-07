@@ -79,11 +79,6 @@ def parse_args():
                    help='Render gameplay (default: False)')
     p.add_argument('--render-freq', type=int, default=1,
                    help='Frequency to render (default: 1)')
-    p.add_argument('--zero-a2', action='store_true',
-                   help='Append _zeroing suffix (options: zero a21; a1+a2 play normally)')
-    p.add_argument('--zero-a1', action='store_true',
-                   help='Append _zeroing2 suffix (options: zero a1; a21+a2 play normally)')
-    
     cli = p.parse_args()
 
     # Read .ini config
@@ -102,7 +97,7 @@ def parse_args():
     args.skip_rate = cfg.getint('DEFAULT', 'skip_rate', fallback=4)
     args.max_episode_length = cli.max_episode_length
     args.input_normalization_class = cfg.get('DEFAULT', 'input_normalization_class', fallback='NormalizedEnv')
-    args.model_type = cfg.get('DEFAULT', 'model_type', fallback='Hierarchial')
+    args.model_type = cfg.get('DEFAULT', 'model_type', fallback='Hierarchial_interactor_options')
     args.env_config = cfg.get('DEFAULT', 'env_config', fallback='configs/envs_config.json')
     args.normalization_alpha = cfg.getfloat('DEFAULT', 'normalization_alpha', fallback=0.9999)
     args.monitor_s = False
@@ -120,9 +115,6 @@ def parse_args():
     args.render = cli.render
     args.render_freq = cli.render_freq
     args.gpu_id = cli.gpu_id
-    args.zero_a2 = cli.zero_a2
-    args.zero_a1 = cli.zero_a1
-
     return args
 
 
@@ -138,11 +130,6 @@ def load_model_and_env(args):
 
     num_inputs = env.observation_space.shape[0]
 
-    if getattr(args, 'zero_a1', False):
-        args.model_type = args.model_type + '_zeroing2'
-    elif getattr(args, 'zero_a2', False):
-        args.model_type = args.model_type + '_zeroing'
-    
     model_cls = getattr(model_module, args.model_type)
     net = model_cls(num_inputs, env.action_space, args)
     
@@ -167,11 +154,9 @@ def load_model_and_env(args):
 
 
 def _reset_model_memory(net):
-    """Reset model internal memory if applicable."""
-    if hasattr(net, 'running_mem'):
-        net.running_mem = torch.zeros((1, 64, 4, 4))
-    if hasattr(net, 'prev_x_conv'):
-        net.prev_x_conv = None
+    """Reset option state between episodes."""
+    if hasattr(net, 'current_option'):
+        net.current_option = None
 
 
 def run_evaluation(net, env, args):
@@ -287,19 +272,11 @@ def save_eval_results(all_episodes_data, args):
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H:%M:%S')
         model_name = os.path.basename(args.model_path).split('.')[0]
         
-        if getattr(args, 'zero_a1', False):
-            zeroing_suffix = "_zeroing2"
-        elif getattr(args, 'zero_a2', False):
-            zeroing_suffix = "_zeroing"
-        else:
-            zeroing_suffix = ""
-        
         if args.on_cluster:
-            # On cluster: save to logs/experiment_name/Eval_.../
             exp_name = getattr(args, 'experiment_name', 'eval')
-            args.output_dir = f"logs/{exp_name}/Eval_{timestamp}_{model_name}{zeroing_suffix}/"
+            args.output_dir = f"logs/{exp_name}/Eval_{timestamp}_{model_name}/"
         else:
-            args.output_dir = f"./Eval_{timestamp}_{model_name}{zeroing_suffix}/"
+            args.output_dir = f"./Eval_{timestamp}_{model_name}/"
     
     os.makedirs(args.output_dir, exist_ok=True)
     print(f"\n[eval] Saving results to: {args.output_dir}")
