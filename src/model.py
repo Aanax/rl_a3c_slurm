@@ -169,6 +169,12 @@ class Hierarchial_interactor_options(nn.Module):
             a2_sample = a2_probs.multinomial(1)
         else:
             beta_active = (beta.detach() * prev_option).sum(dim=1, keepdim=True)
+            beta_active = beta_active.clamp(0.0, 1.0)
+            beta_active = torch.where(
+                torch.isfinite(beta_active),
+                beta_active,
+                torch.full_like(beta_active, 0.5),
+            )
             terminate = torch.bernoulli(beta_active)
             prev_idx = prev_option.argmax(dim=1, keepdim=True)
             new_idx = a2_probs.multinomial(1)

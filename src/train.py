@@ -283,6 +283,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
 
             player.model.zero_grad()
             total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(player.model.parameters(), 40.0)
             ensure_shared_grads(player.model, shared_model, gpu=gpu_id >= 0)
             optimizer.step()
 
