@@ -59,6 +59,9 @@ args.w_kld_loss = config.getfloat('DEFAULT', 'w_kld_loss', fallback=0.0)
 args.w_restoration_loss = config.getfloat('DEFAULT', 'w_restoration_loss', fallback=0.0)
 args.monitor_losses = config.getboolean('DEFAULT', 'monitor_losses', fallback=False)
 args.save_model_steps = config.getint('DEFAULT', 'save_model_steps', fallback=0)
+args.save_model_milestone_steps = config.getint(
+    'DEFAULT', 'save_model_milestone_steps', fallback=2000000
+)
 args.use_beta_termination = config.getboolean('DEFAULT', 'use_beta_termination', fallback=True)
 args.beta_coef = config.getfloat('DEFAULT', 'beta_coef', fallback=1.0)
 

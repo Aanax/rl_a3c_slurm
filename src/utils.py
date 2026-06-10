@@ -1,8 +1,11 @@
 from __future__ import division
-import numpy as np
-import torch
+import glob
 import json
 import logging
+import os
+
+import numpy as np
+import torch
 
 
 def setup_logger(logger_name, log_file, level=logging.INFO):
@@ -28,6 +31,33 @@ def norm_col_init(weights, std=1.0):
     x = torch.randn(weights.size())
     x *= std / torch.sqrt((x**2).sum(1, keepdim=True))
     return x
+
+
+def model_checkpoint_dir(args):
+    return os.path.join(args.log_dir, args.experiment_name, "models", f"p{args.parallel_id}")
+
+
+def format_score(score):
+    if score == int(score):
+        return str(int(score))
+    return f"{score:.2f}".replace('.', 'p')
+
+
+def checkpoint_filename(kind, steps, score=None):
+    if score is not None:
+        return f"{kind}_steps{steps}_score{format_score(score)}.dat"
+    return f"{kind}_steps{steps}.dat"
+
+
+def save_checkpoint(state_dict, args, kind, steps, score=None, replace_previous=True):
+    save_dir = model_checkpoint_dir(args)
+    os.makedirs(save_dir, exist_ok=True)
+    if replace_previous:
+        for path in glob.glob(os.path.join(save_dir, f"{kind}_*.dat")):
+            os.remove(path)
+    path = os.path.join(save_dir, checkpoint_filename(kind, steps, score))
+    torch.save(state_dict, path)
+    return path
 
 
 def ensure_shared_grads(model, shared_model, gpu=False):

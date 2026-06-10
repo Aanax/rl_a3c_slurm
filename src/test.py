@@ -4,7 +4,7 @@ os.environ["OMP_NUM_THREADS"] = "1"
 from setproctitle import setproctitle as ptitle
 import torch
 from environment import atari_env
-from utils import setup_logger
+from utils import save_checkpoint, setup_logger
 import model
 from player_util import Agent
 from torch.autograd import Variable
@@ -54,8 +54,7 @@ def test(args, shared_model, env_conf, frames_total):
     else:
         player.state = torch.from_numpy(player.state).float()
 
-    flag = True
-    max_score = 0
+    max_score = float('-inf')
     rgb_frames = []
     step_counter = 0
     prev_video_at = 0
@@ -105,20 +104,24 @@ def test(args, shared_model, env_conf, frames_total):
                     saveanimation(rgb_frames, address=address)
                     prev_video_at = step_counter
                 rgb_frames = []
-                if (args.save_max and reward_sum >= max_score) or not args.save_max:
-                    if reward_sum >= max_score:
-                        max_score = reward_sum
-                    if gpu_id >= 0:
-                        with torch.cuda.device(gpu_id):
-                            state_to_save = player.model.state_dict()
-                            torch.save(
-                                state_to_save, f"{args.log_dir}{args.experiment_name}_{args.parallel_id}.dat"
-                            )
-                    else:
+                steps = frames_total.value
+                if gpu_id >= 0:
+                    with torch.cuda.device(gpu_id):
                         state_to_save = player.model.state_dict()
-                        torch.save(
-                            state_to_save, f"{args.log_dir}{args.experiment_name}_{args.parallel_id}.dat"
-                        )
+                else:
+                    state_to_save = player.model.state_dict()
+
+                latest_path = save_checkpoint(
+                    state_to_save, args, 'latest', steps, score=reward_sum
+                )
+                log.info(f'Saved latest checkpoint: {latest_path}')
+
+                if reward_sum > max_score:
+                    max_score = reward_sum
+                    best_path = save_checkpoint(
+                        state_to_save, args, 'best', steps, score=reward_sum
+                    )
+                    log.info(f'Saved best checkpoint: {best_path}')
 
                 reward_sum = 0
                 player.eps_len = 0

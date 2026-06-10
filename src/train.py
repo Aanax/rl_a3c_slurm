@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 import torch.optim as optim
 from environment import atari_env
-from utils import ensure_shared_grads
+from utils import ensure_shared_grads, save_checkpoint
 import model
 from player_util import Agent
 import time
@@ -74,6 +74,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
     batch_count = 0
     loss_csv_path = None
     last_save = 0
+    milestone_saved = False
     if args.monitor_losses:
         log_dir_path = f"{args.log_dir}{args.experiment_name}/"
         os.makedirs(log_dir_path, exist_ok=True)
@@ -308,6 +309,17 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             player.clear_actions()
             steps_taken = step + 1 if player.done else num_steps
             frames_total.value += steps_taken
+            if (
+                rank == 0
+                and not milestone_saved
+                and args.save_model_milestone_steps > 0
+                and frames_total.value >= args.save_model_milestone_steps
+            ):
+                milestone_saved = True
+                milestone_path = save_checkpoint(
+                    shared_model.state_dict(), args, 'milestone', frames_total.value
+                )
+                print(f"Saved milestone checkpoint: {milestone_path}")
             if frames_total.value > args.total_steps_stop:
                 break
     except KeyboardInterrupt:
