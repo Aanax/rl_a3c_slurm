@@ -3,7 +3,7 @@ draw_eval_gifs.py — Download evaluation results from remote server and create 
 
 This script downloads evaluation artifacts from a remote server (via SSH/SFTP),
 then creates two MP4 videos:
-  1. actions.mp4 - Shows Q-values for level1, level2, and selected actions
+  1. actions.mp4 - Shows Q-values for level1, level2, and beta (or actions if no beta)
   2. VS_short.mp4 - Shows V1, V2 values and rewards over time
 
 Usage:
@@ -217,7 +217,7 @@ def download_eval_files(eval_folder, local_dir, server, username, remote_project
     
     # Files we need to download (matching the old naming convention)
     needed_suffixes = [
-        'Q11s.npy', 'Q22s.npy', 'Q21s.npy', 'aas.npy',
+        'Q11s.npy', 'Q22s.npy', 'Q21s.npy', 'aas.npy', 'betas.npy', 'beta_active.npy',
         'Frames_normalized_orig.npy', 'Vs.npy', 'Vs2.npy',
         'rewards.npy', 'gs2.npy', 'gs1.npy', 'ss.npy', 'ss2.npy'
     ]
@@ -285,6 +285,8 @@ def load_eval_data(eval_folder, local_dir):
         'Q11s.npy': 'Q_int',      # Level 1 logits (intrinsic/mixed)
         'Q22s.npy': 'Q_ext',      # Level 2 logits (extrinsic)
         'aas.npy': 'action',      # Selected actions
+        'betas.npy': 'betas',     # Per-option termination betas
+        'beta_active.npy': 'beta_active',  # Active termination beta
         'Vs.npy': 'Vs',           # Level 1 values
         'Vs2.npy': 'Vs2',         # Level 2 values
         'rewards.npy': 'rewards', # Rewards
@@ -310,7 +312,7 @@ def load_eval_data(eval_folder, local_dir):
 
 def create_action_gif(data, eval_folder, local_dir, fps=3, start_idx=0, stop_idx=300, window_size=34):
     """
-    Create actions visualization GIF showing Q-values and selected actions.
+    Create actions visualization MP4 showing Q-values and beta or selected actions.
     """
     print("\n[draw] Creating actions visualization...")
     
@@ -323,11 +325,17 @@ def create_action_gif(data, eval_folder, local_dir, fps=3, start_idx=0, stop_idx
     Q_int = data.get('Q_int', None)
     Q_ext = data.get('Q_ext', None)
     actions = data.get('action', None)
+    betas = data.get('betas', None)
+    beta_active = data.get('beta_active', None)
     
     if Q_int is not None:
         print(f"[draw] Q_int shape: {Q_int.shape}, range: [{np.min(Q_int):.2f}, {np.max(Q_int):.2f}]")
     if Q_ext is not None:
         print(f"[draw] Q_ext shape: {Q_ext.shape}, range: [{np.min(Q_ext):.2f}, {np.max(Q_ext):.2f}]")
+    if betas is not None:
+        print(f"[draw] Betas shape: {betas.shape}, range: [{np.min(betas):.2f}, {np.max(betas):.2f}]")
+    if beta_active is not None:
+        print(f"[draw] Beta_active shape: {beta_active.shape}, range: [{np.min(beta_active):.2f}, {np.max(beta_active):.2f}]")
     if actions is not None:
         print(f"[draw] Actions shape: {actions.shape}")
     
@@ -339,7 +347,16 @@ def create_action_gif(data, eval_folder, local_dir, fps=3, start_idx=0, stop_idx
     if Q_int is not None:
         # Q11s = level 1 logits (action space dim for a1)
         values_dict['logits1 (level1)'] = {'value': Q_int, 'legend': action_legend[:Q_int.shape[1]] if len(Q_int.shape) > 1 else action_legend}
-    if actions is not None:
+    if betas is not None:
+        values_dict['beta (level2 options)'] = {
+            'value': betas,
+            'legend': [str(i) for i in range(betas.shape[1])],
+        }
+    elif beta_active is not None:
+        if len(beta_active.shape) == 1:
+            beta_active = np.expand_dims(beta_active, axis=1)
+        values_dict['beta_active'] = {'value': beta_active, 'legend': ['beta_active']}
+    elif actions is not None:
         # Squeeze actions if needed
         if len(actions.shape) > 1:
             actions = np.squeeze(actions, axis=1)

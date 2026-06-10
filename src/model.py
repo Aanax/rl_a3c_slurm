@@ -161,6 +161,11 @@ class Hierarchial_interactor_options(nn.Module):
         V2 = self.critic_linear2(s2_flat)
         beta = torch.sigmoid(self.beta_linear(s2_flat))
 
+        if getattr(self, 'monitor_beta', False):
+            if not hasattr(self, 'beta_values'):
+                self.beta_values = []
+            self.beta_values.append(beta.detach().cpu())
+
         a2_probs = F.softmax(a2_logits, dim=1)
 
         prev_option = self.current_option

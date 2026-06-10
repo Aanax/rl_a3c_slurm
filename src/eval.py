@@ -23,6 +23,8 @@ Output format (saved as .npy files):
     Q11s.npy - Level 1 logits (N, num_actions)
     Q22s.npy - Level 2 logits (N, 16) 
     aas.npy - Selected actions (N, 1)
+    betas.npy - Per-option termination betas (N, num_options), if use_beta_termination
+    beta_active.npy - Active termination beta for current option (N, 1), if use_beta_termination
     rewards.npy - Rewards (N,)
     Vs.npy - Level 1 values (N, 1)
     Vs2.npy - Level 2 values (N, 1)
@@ -102,6 +104,9 @@ def parse_args():
     args.normalization_alpha = cfg.getfloat('DEFAULT', 'normalization_alpha', fallback=0.9999)
     args.monitor_s = False
     args.use_rmsnorm = False
+    args.use_beta_termination = cfg.getboolean(
+        'DEFAULT', 'use_beta_termination', fallback=False
+    )
     
     gpu_str = cfg.get('DEFAULT', 'gpu_ids', fallback='-1')
     cfg_gpu_ids = [int(x.strip()) for x in gpu_str.split(',') if x.strip()]
@@ -157,6 +162,12 @@ def _reset_model_memory(net):
     """Reset option state between episodes."""
     if hasattr(net, 'current_option'):
         net.current_option = None
+    if hasattr(net, 'beta_values'):
+        net.beta_values = []
+
+
+def _model_uses_beta(net, args):
+    return args.use_beta_termination and hasattr(net, 'beta_linear')
 
 
 def run_evaluation(net, env, args):
@@ -166,6 +177,11 @@ def run_evaluation(net, env, args):
     Returns dictionaries with collected data for each episode.
     """
     gpu_id = args.gpu_id
+    log_beta = _model_uses_beta(net, args)
+    if log_beta:
+        net.monitor_beta = True
+        net.beta_values = []
+        print("[eval] Beta logging enabled")
     
     all_episodes_data = []
     
@@ -183,6 +199,8 @@ def run_evaluation(net, env, args):
         Q11s = []  # Level 1 logits
         Q22s = []  # Level 2 logits
         aas = []  # Actions taken
+        betas = []  # Per-option termination betas
+        beta_active = []  # Active termination beta for current option
         rewards = []  # Rewards received
         Vs = []  # Level 1 values
         Vs2 = []  # Level 2 values
@@ -202,11 +220,14 @@ def run_evaluation(net, env, args):
             with torch.no_grad():
                 model_output = net(obs_t, torch.zeros(1), torch.zeros(1))
             
-            # Parse model output: (V1, a1, hx, cx, None, None, V2, a2_logits)
+            # Parse model output:
+            # (V1, combined_logits, hx, cx, None, None, V2, a2_logits,
+            #  a1_logits, a_21_logits, a2_sample, beta_active)
             V1 = model_output[0]
             a1_logits = model_output[1]
             V2 = model_output[6]
             a2_logits = model_output[7]
+            beta_active_step = model_output[11]
             
             # Get action probabilities and select action (greedy)
             prob = F.softmax(a1_logits, dim=1)
@@ -219,6 +240,9 @@ def run_evaluation(net, env, args):
             Q11s.append(a1_logits.cpu().numpy()[0])  # Level 1 logits
             Q22s.append(a2_logits.cpu().numpy()[0])  # Level 2 logits (16-dim)
             aas.append([action])  # Action taken
+            if log_beta:
+                betas.append(net.beta_values[-1].numpy()[0])
+                beta_active.append(beta_active_step.cpu().numpy()[0])
             Vs.append(V1.cpu().numpy()[0])  # Level 1 value
             Vs2.append(V2.cpu().numpy()[0])  # Level 2 value
             
@@ -234,9 +258,11 @@ def run_evaluation(net, env, args):
             rewards.append(reward)
             step_count += 1
             
-            # Clear s_values after storing to prevent memory buildup
+            # Clear cached forward-pass values after storing
             if hasattr(net, 's_values'):
                 net.s_values = []
+            if log_beta and hasattr(net, 'beta_values'):
+                net.beta_values = []
         
         print(f"[eval] Episode complete: {step_count} steps, reward = {reward_sum:.2f}")
         
@@ -251,6 +277,9 @@ def run_evaluation(net, env, args):
             'Vs': np.array(Vs),
             'Vs2': np.array(Vs2),
         }
+        if log_beta:
+            episode_data['betas'] = np.array(betas)
+            episode_data['beta_active'] = np.array(beta_active)
         
         if frames_render:
             episode_data['frames_render'] = frames_render
