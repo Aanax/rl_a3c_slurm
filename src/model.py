@@ -142,6 +142,7 @@ class Hierarchial_interactor_options(nn.Module):
         self.beta_linear.bias.data.fill_(0.0)
 
         self.current_option = None
+        self.last_beta_logits = None
 
         self.train()
 
@@ -159,12 +160,17 @@ class Hierarchial_interactor_options(nn.Module):
         s2_flat = s2.view(s2.size(0), -1)
         a2_logits = self.actor_linear2(s2_flat)
         V2 = self.critic_linear2(s2_flat)
-        beta = torch.sigmoid(self.beta_linear(s2_flat))
+        beta_logits = self.beta_linear(s2_flat)
+        beta = torch.sigmoid(beta_logits)
+        self.last_beta_logits = beta_logits.detach()
 
         if getattr(self, 'monitor_beta', False):
             if not hasattr(self, 'beta_values'):
                 self.beta_values = []
             self.beta_values.append(beta.detach().cpu())
+            if not hasattr(self, 'beta_logits_values'):
+                self.beta_logits_values = []
+            self.beta_logits_values.append(beta_logits.detach().cpu())
 
         a2_probs = F.softmax(a2_logits, dim=1)
 

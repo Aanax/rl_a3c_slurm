@@ -24,6 +24,7 @@ Output format (saved as .npy files):
     Q22s.npy - Level 2 logits (N, 16) 
     aas.npy - Selected actions (N, 1)
     betas.npy - Per-option termination betas (N, num_options), if use_beta_termination
+    beta_logits.npy - Pre-sigmoid beta logits (N, num_options), if use_beta_termination
     beta_active.npy - Active termination beta for current option (N, 1), if use_beta_termination
     rewards.npy - Rewards (N,)
     Vs.npy - Level 1 values (N, 1)
@@ -164,6 +165,9 @@ def _reset_model_memory(net):
         net.current_option = None
     if hasattr(net, 'beta_values'):
         net.beta_values = []
+    if hasattr(net, 'beta_logits_values'):
+        net.beta_logits_values = []
+    net.last_beta_logits = None
 
 
 def _model_uses_beta(net, args):
@@ -200,6 +204,7 @@ def run_evaluation(net, env, args):
         Q22s = []  # Level 2 logits
         aas = []  # Actions taken
         betas = []  # Per-option termination betas
+        beta_logits = []  # Pre-sigmoid beta logits
         beta_active = []  # Active termination beta for current option
         rewards = []  # Rewards received
         Vs = []  # Level 1 values
@@ -242,6 +247,7 @@ def run_evaluation(net, env, args):
             aas.append([action])  # Action taken
             if log_beta:
                 betas.append(net.beta_values[-1].numpy()[0])
+                beta_logits.append(net.last_beta_logits.cpu().numpy()[0])
                 beta_active.append(beta_active_step.cpu().numpy()[0])
             Vs.append(V1.cpu().numpy()[0])  # Level 1 value
             Vs2.append(V2.cpu().numpy()[0])  # Level 2 value
@@ -263,6 +269,8 @@ def run_evaluation(net, env, args):
                 net.s_values = []
             if log_beta and hasattr(net, 'beta_values'):
                 net.beta_values = []
+            if log_beta and hasattr(net, 'beta_logits_values'):
+                net.beta_logits_values = []
         
         print(f"[eval] Episode complete: {step_count} steps, reward = {reward_sum:.2f}")
         
@@ -279,6 +287,7 @@ def run_evaluation(net, env, args):
         }
         if log_beta:
             episode_data['betas'] = np.array(betas)
+            episode_data['beta_logits'] = np.array(beta_logits)
             episode_data['beta_active'] = np.array(beta_active)
         
         if frames_render:

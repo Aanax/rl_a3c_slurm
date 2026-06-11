@@ -53,6 +53,74 @@ except ImportError:
     paramiko = None
 
 
+def _panel_ylim(panel_cfg, val_data):
+    if 'ylim' in panel_cfg:
+        return panel_cfg['ylim']
+    return np.min(val_data), np.max(val_data)
+
+
+def _plot_panel(ax, window, panel_cfg):
+    legend = panel_cfg.get('legend', None)
+    plot_style = panel_cfg.get('plot_style', 'line')
+    x = np.arange(window.shape[0])
+    markersize = panel_cfg.get('markersize', 6)
+
+    if panel_cfg.get('plot_columns', False) and window.ndim == 2 and window.shape[1] > 1:
+        for col in range(window.shape[1]):
+            label = legend[col] if legend and col < len(legend) else f'{col}'
+            if plot_style == 'dots':
+                ax.plot(
+                    x, window[:, col], 'o', label=label,
+                    markersize=markersize, linestyle='None',
+                )
+            else:
+                ax.plot(x, window[:, col], label=label)
+    elif window.ndim == 2:
+        if plot_style == 'dots':
+            for col in range(window.shape[1]):
+                ax.plot(x, window[:, col], 'o', markersize=markersize, linestyle='None')
+        else:
+            ax.plot(window)
+    else:
+        flat = window.reshape(-1)
+        if plot_style == 'dots':
+            ax.plot(x, flat, 'o', markersize=markersize, linestyle='None')
+        else:
+            ax.plot(flat)
+
+    overlay = panel_cfg.get('overlay')
+    if overlay is not None:
+        overlay_window = overlay['value']
+        if overlay_window.ndim == 1:
+            overlay_window = overlay_window.reshape(-1, 1)
+        overlay_label = overlay.get('legend', ['overlay'])[0]
+        overlay_x = np.arange(overlay_window.shape[0])
+        overlay_style = overlay.get('plot_style', plot_style)
+        overlay_markersize = overlay.get('markersize', markersize + 2)
+        if overlay_style == 'dots':
+            ax.plot(
+                overlay_x, overlay_window[:, 0], 'o',
+                label=overlay_label,
+                color=overlay.get('color', 'black'),
+                markersize=overlay_markersize,
+                linestyle='None',
+            )
+        else:
+            ax.plot(
+                overlay_x, overlay_window[:, 0],
+                label=overlay_label,
+                color=overlay.get('color', 'black'),
+                linewidth=overlay.get('linewidth', 3.0),
+            )
+
+
+def _set_panel_legend(ax, panel_cfg):
+    if panel_cfg.get('overlay') is not None or panel_cfg.get('plot_columns'):
+        ax.legend(loc="lower right", fontsize=8, ncol=2)
+    elif panel_cfg.get('legend') is not None:
+        ax.legend(panel_cfg['legend'], loc="lower right", fontsize=8, ncol=2)
+
+
 def draw_frames_with_info(values, images, experiment_title, start_idx=0, stop_idx=-1, WINDOWSIZE=34, pad=1):
     """
     Draw frames with overlaid value plots.
@@ -77,8 +145,8 @@ def draw_frames_with_info(values, images, experiment_title, start_idx=0, stop_id
     for n_row in range(int(skip_v1_v2), n_values):
         value_name = list(values.keys())[n_row]
         axs[value_name] = plt.subplot(gs[n_row, :3])
-        axs[value_name].set_ylim(bottom=np.min(values[value_name]['value']),
-                                 top=np.max(values[value_name]['value']))
+        ymin, ymax = _panel_ylim(values[value_name], values[value_name]['value'])
+        axs[value_name].set_ylim(bottom=ymin, top=ymax)
 
     image_axs = plt.subplot(gs[0:n_values, 3:])
 
@@ -97,14 +165,21 @@ def draw_frames_with_info(values, images, experiment_title, start_idx=0, stop_id
 
         # Plot values on axes
         for value_name in axs:
-            val_data = values[value_name]['value']
-            axs[value_name].set_ylim(bottom=np.min(val_data), top=np.max(val_data))
+            panel_cfg = values[value_name]
+            val_data = panel_cfg['value']
+            window = val_data[start:end]
+            plot_cfg = panel_cfg
+            if 'overlay' in panel_cfg:
+                plot_cfg = dict(panel_cfg)
+                overlay = dict(panel_cfg['overlay'])
+                overlay['value'] = overlay['value'][start:end]
+                plot_cfg['overlay'] = overlay
+            ymin, ymax = _panel_ylim(panel_cfg, val_data)
+            axs[value_name].set_ylim(bottom=ymin, top=ymax)
             axs[value_name].set_title(value_name, fontstyle='italic')
-            axs[value_name].plot(val_data[start:end])
+            _plot_panel(axs[value_name], window, plot_cfg)
             axs[value_name].axvline(x=dotpos, color='green')
-            legend = values[value_name].get('legend', None)
-            if legend is not None:
-                axs[value_name].legend(legend, loc="lower right")
+            _set_panel_legend(axs[value_name], plot_cfg)
 
         # Plot image - handle different input formats
         img = images[idx]
@@ -217,7 +292,7 @@ def download_eval_files(eval_folder, local_dir, server, username, remote_project
     
     # Files we need to download (matching the old naming convention)
     needed_suffixes = [
-        'Q11s.npy', 'Q22s.npy', 'Q21s.npy', 'aas.npy', 'betas.npy', 'beta_active.npy',
+        'Q11s.npy', 'Q22s.npy', 'Q21s.npy', 'aas.npy', 'betas.npy', 'beta_logits.npy', 'beta_active.npy',
         'Frames_normalized_orig.npy', 'Vs.npy', 'Vs2.npy',
         'rewards.npy', 'gs2.npy', 'gs1.npy', 'ss.npy', 'ss2.npy'
     ]
@@ -286,6 +361,7 @@ def load_eval_data(eval_folder, local_dir):
         'Q22s.npy': 'Q_ext',      # Level 2 logits (extrinsic)
         'aas.npy': 'action',      # Selected actions
         'betas.npy': 'betas',     # Per-option termination betas
+        'beta_logits.npy': 'beta_logits',  # Pre-sigmoid beta logits
         'beta_active.npy': 'beta_active',  # Active termination beta
         'Vs.npy': 'Vs',           # Level 1 values
         'Vs2.npy': 'Vs2',         # Level 2 values
@@ -348,14 +424,36 @@ def create_action_gif(data, eval_folder, local_dir, fps=3, start_idx=0, stop_idx
         # Q11s = level 1 logits (action space dim for a1)
         values_dict['logits1 (level1)'] = {'value': Q_int, 'legend': action_legend[:Q_int.shape[1]] if len(Q_int.shape) > 1 else action_legend}
     if betas is not None:
-        values_dict['beta (level2 options)'] = {
+        beta_panel = {
             'value': betas,
-            'legend': [str(i) for i in range(betas.shape[1])],
+            'legend': [f'opt{i}' for i in range(betas.shape[1])],
+            'ylim': (0.0, 1.0),
+            'plot_columns': True,
+            'plot_style': 'dots',
+            'markersize': 5,
         }
+        if beta_active is not None:
+            beta_active_flat = np.squeeze(beta_active)
+            if beta_active_flat.ndim == 1:
+                beta_panel['overlay'] = {
+                    'value': beta_active_flat,
+                    'legend': ['beta_active (current option)'],
+                    'color': 'black',
+                    'plot_style': 'dots',
+                    'markersize': 8,
+                }
+        values_dict['beta probabilities P(terminate | opt_i)'] = beta_panel
     elif beta_active is not None:
-        if len(beta_active.shape) == 1:
-            beta_active = np.expand_dims(beta_active, axis=1)
-        values_dict['beta_active'] = {'value': beta_active, 'legend': ['beta_active']}
+        beta_active_flat = np.squeeze(beta_active)
+        if beta_active_flat.ndim == 1:
+            beta_active_flat = beta_active_flat.reshape(-1, 1)
+        values_dict['beta_active P(terminate)'] = {
+            'value': beta_active_flat,
+            'legend': ['beta_active'],
+            'ylim': (0.0, 1.0),
+            'plot_style': 'dots',
+            'markersize': 6,
+        }
     elif actions is not None:
         # Squeeze actions if needed
         if len(actions.shape) > 1:
