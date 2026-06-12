@@ -205,6 +205,10 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
 
                 gae = gae * args.gamma * args.tau + delta_t
                 actor1_gae = (gae + gae2).detach()
+                if args.train_version == 'v2':
+                    l2_gae = gae2.detach()
+                else:
+                    l2_gae = actor1_gae
 
                 policy_loss = (
                     policy_loss
@@ -212,7 +216,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     - (args.entropy_coef * player.entropies[i])
                 )
 
-                beta_adv = (gae + gae2).detach()
+                beta_adv = l2_gae
                 beta_loss = beta_loss + player.betas[i] * beta_adv
 
                 a2_logits_i = player.a2_logits[i]
@@ -241,7 +245,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 kld_i = F.kl_div(
                     pred_log_dist, target_dist, reduction='batchmean'
                 )
-                policy_loss2 = policy_loss2 + kld_i * actor1_gae
+                policy_loss2 = policy_loss2 + kld_i * l2_gae
 
                 a1_logits_i = player.a1_logits[i]
                 a_21_logits_i = player.a_21_logits[i]
@@ -273,7 +277,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 kld_i = F.kl_div(
                     pred_log_dist, target_dist, reduction='batchmean'
                 )
-                interactor_loss = interactor_loss + kld_i * actor1_gae
+                interactor_loss = interactor_loss + kld_i * l2_gae
 
             value_loss = value_loss + value_loss2
             beta_term = args.beta_coef * beta_loss
