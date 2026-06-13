@@ -54,7 +54,7 @@ class Agent(object):
             logit2 = None
             value_intrinsic = None
         elif len(model_output) == 6:
-            if isinstance(self.model, (model_module.A3CRules2378OracleIntrinsicCritic, model_module.A3CRules2378OracleFCIntrinsicCritic)):
+            if isinstance(self.model, (model_module.A3CRules2378OracleIntrinsicCritic, model_module.A3CRules2378OracleFCIntrinsicCritic, model_module._IntrinsicCriticMixin)):
                 value, logit, self.hx, self.cx, x_restored, value_intrinsic = model_output
                 kl = None
             else:
@@ -100,6 +100,8 @@ class Agent(object):
                 self.model.running_mem = torch.zeros_like(self.model.running_mem)
             if hasattr(self.model, 'prev_x_conv'):
                 self.model.prev_x_conv = None
+            if hasattr(self.model, 'prev_shared'):
+                self.model.prev_shared = None
 
         self.eps_len += 1
         self.reward = max(min(self.reward, 1), -1)
@@ -131,6 +133,8 @@ class Agent(object):
                         self.model.running_mem = torch.zeros_like(self.model.running_mem)
                     if hasattr(self.model, 'prev_x_conv'):
                         self.model.prev_x_conv = None
+                    if hasattr(self.model, 'prev_shared'):
+                        self.model.prev_shared = None
                 except:
                     pass
                 

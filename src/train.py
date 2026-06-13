@@ -204,10 +204,12 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 )
                 value = model_output[0]
                 R = value.detach()
-                if isinstance(player.model, (model.A3CRules2378OracleIntrinsicCritic, model.A3CRules2378OracleFCIntrinsicCritic)) and len(model_output) >= 6:
+                if isinstance(player.model, (model.A3CRules2378OracleIntrinsicCritic, model.A3CRules2378OracleFCIntrinsicCritic, model._IntrinsicCriticMixin)) and len(model_output) >= 6:
                     R_intrinsic = model_output[5].detach()
+                    w_intrinsic = 1.0
                 else:
                     R_intrinsic = value.detach()
+                    w_intrinsic = 0.0
                 # For hierarchical models, also get V2
                 if len(model_output) >= 8:
                     value2 = model_output[6]
@@ -258,9 +260,14 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 if args.w_restoration_loss > 0 and len(player.x_restoreds) > 0:
                     G_t = G_t * args.gamma_restoration + player.next_states[i] - player.states[i]
 
+                    if args.relu_g_const:
+                        G_const = F.relu(G_t.detach().view(-1))
+                    else:
+                        G_const = G_t.detach().view(-1)
+
                     cosine_const = F.cosine_similarity(
                         player.x_restoreds[i].detach().view(-1),
-                        G_t.detach().view(-1), 
+                        G_const,
                         dim=0
                     ).squeeze(0)
                     cosine_const_values.append(cosine_const.item())
@@ -274,11 +281,11 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                         oracle_r
                         + args.gamma * player.values_intrinsic[i + 1].data
                         - player.values_intrinsic[i].data
-                    )
+                    ) * w_intrinsic
 
                     cosine_restoreds = -F.cosine_similarity(
                         player.x_restoreds[i].view(-1),
-                        G_t.detach().view(-1),
+                        G_const,
                         dim=0,
                     )
                     restoration_loss = restoration_loss + args.w_restoration_loss * cosine_restoreds * delta_t
@@ -349,7 +356,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             if is_hierarchical:
                 total_loss = policy_loss + policy_loss2 + 0.5 * value_loss + kld_loss + restoration_loss
             else:
-                total_loss = policy_loss + 0.5 * value_loss + kld_loss + restoration_loss + 0.5 * value_intrinsic_loss
+                total_loss = policy_loss + 0.5 * value_loss + kld_loss + restoration_loss + 0.5 * value_intrinsic_loss * w_intrinsic
             player.model.zero_grad()
             total_loss.backward()
             ensure_shared_grads(player.model, shared_model, gpu=gpu_id >= 0)
@@ -379,7 +386,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                         (0.5 * value_loss).item(),
                         kld_loss.item() if isinstance(kld_loss, torch.Tensor) else kld_loss,
                         restoration_loss.item() if isinstance(restoration_loss, torch.Tensor) else restoration_loss,
-                        (0.5 * value_intrinsic_loss).item(),
+                        (0.5 * value_intrinsic_loss).item() if isinstance(value_intrinsic_loss, torch.Tensor) else 0.5 * value_intrinsic_loss,
                     ])
             elif args.monitor_cosine_const:
                 batch_count += 1
