@@ -113,6 +113,7 @@ class Hierarchial_interactor_options(nn.Module):
         self.interactor = nn.Linear(self.num_options, num_outputs)
 
         self.critic_linear = nn.Linear(64*4*4, 1)
+        self.critic_linear_intr = nn.Linear(64*4*4, 1)
         self.actor_linear = nn.Linear(64*4*4, num_outputs)
 
         for linear in [self.critic_linear2, self.actor_linear2]:
@@ -121,7 +122,7 @@ class Hierarchial_interactor_options(nn.Module):
             nn.init.normal_(linear.weight, mean=0.0, std=std)
             linear.bias.data.fill_(0)
 
-        for linear in [self.critic_linear, self.actor_linear]:
+        for linear in [self.critic_linear, self.critic_linear_intr, self.actor_linear]:
             fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
             std = 1.0 / math.sqrt(fan_in)
             nn.init.normal_(linear.weight, mean=0.0, std=std)
@@ -129,6 +130,7 @@ class Hierarchial_interactor_options(nn.Module):
 
         self.actor_linear.weight.data.mul_(0.01)
         self.critic_linear.weight.data.mul_(1.0)
+        self.critic_linear_intr.weight.data.mul_(1.0)
 
         fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.interactor.weight)
         std = 0.01 / math.sqrt(fan_in)
@@ -208,11 +210,12 @@ class Hierarchial_interactor_options(nn.Module):
         s_flat = F.relu(s_flat)
         a1_logits = self.actor_linear(s_flat)
         V1 = self.critic_linear(s_flat)
+        V_intr = self.critic_linear_intr(s_flat)
 
         combined_logits = a1_logits + a_21_logits.detach()
 
         return (V1, combined_logits, hx, cx, None, None, V2, a2_logits,
-                a1_logits, a_21_logits, a2_sample, beta_active_grad)
+                a1_logits, a_21_logits, a2_sample, beta_active_grad, V_intr)
 
 
 class Hierarchial_interactor_options_zeroing_(nn.Module):
@@ -331,7 +334,7 @@ class Hierarchial_interactor_options_zeroing(Hierarchial_interactor_options):
     def forward(self, inputs, hx, cx, mem=None):
         (
             V1, _, hx, cx, _, _, V2, a2_logits,
-            a1_logits, a_21_logits, a2_sample, beta_active_grad,
+            a1_logits, a_21_logits, a2_sample, beta_active_grad, V_intr,
         ) = super().forward(inputs, hx, cx, mem)
 
         a_21_logits = torch.zeros_like(a_21_logits)
@@ -339,7 +342,7 @@ class Hierarchial_interactor_options_zeroing(Hierarchial_interactor_options):
 
         return (
             V1, combined_logits, hx, cx, None, None, V2, a2_logits,
-            a1_logits, a_21_logits, a2_sample, beta_active_grad,
+            a1_logits, a_21_logits, a2_sample, beta_active_grad, V_intr,
         )
 
 
@@ -349,7 +352,7 @@ class Hierarchial_interactor_options_zeroing2(Hierarchial_interactor_options):
     def forward(self, inputs, hx, cx, mem=None):
         (
             V1, _, hx, cx, _, _, V2, a2_logits,
-            a1_logits, a_21_logits, a2_sample, beta_active_grad,
+            a1_logits, a_21_logits, a2_sample, beta_active_grad, V_intr,
         ) = super().forward(inputs, hx, cx, mem)
 
         a1_logits = torch.zeros_like(a1_logits)
@@ -357,6 +360,6 @@ class Hierarchial_interactor_options_zeroing2(Hierarchial_interactor_options):
 
         return (
             V1, combined_logits, hx, cx, None, None, V2, a2_logits,
-            a1_logits, a_21_logits, a2_sample, beta_active_grad,
+            a1_logits, a_21_logits, a2_sample, beta_active_grad, V_intr,
         )
 

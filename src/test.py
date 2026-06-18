@@ -114,14 +114,14 @@ def test(args, shared_model, env_conf, frames_total):
                 latest_path = save_checkpoint(
                     state_to_save, args, 'latest', steps, score=reward_sum
                 )
-                log.info(f'Saved latest checkpoint: {latest_path}')
+                print(f'Saved latest checkpoint: {latest_path}')
 
                 if reward_sum > max_score:
                     max_score = reward_sum
                     best_path = save_checkpoint(
                         state_to_save, args, 'best', steps, score=reward_sum
                     )
-                    log.info(f'Saved best checkpoint: {best_path}')
+                    print(f'Saved best checkpoint: {best_path}')
 
                 reward_sum = 0
                 player.eps_len = 0

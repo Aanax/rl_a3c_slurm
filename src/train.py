@@ -31,6 +31,22 @@ def compute_level2_loss_v1(args, player, i, gae2, R2):
     return advantage2, value_loss2_i, delta_t2, gae2, R2
 
 
+def compute_internal_critic_loss(args, player, i, gae_intr, R_intr, delta_t2):
+    R_intr = args.gamma * R_intr + delta_t2
+    advantage_intr = R_intr - player.values_intr[i]
+    value_loss_intr_i = 0.5 * advantage_intr.pow(2)
+
+    delta_intr = (
+        delta_t2
+        + args.gamma * player.values_intr[i + 1].data
+        - player.values_intr[i].data
+    )
+
+    gae_intr = gae_intr * args.gamma * args.tau + delta_intr
+
+    return advantage_intr, value_loss_intr_i, delta_intr, gae_intr, R_intr
+
+
 def sampled_action_target(action, logits):
     target = torch.zeros_like(logits)
     return target.scatter(1, action, 1.0)
@@ -140,11 +156,15 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     gae = torch.zeros(1, 1).cuda()
                     R2 = torch.zeros(1, 1).cuda()
                     gae2 = torch.zeros(1, 1).cuda()
+                    R_intr = torch.zeros(1, 1).cuda()
+                    gae_intr = torch.zeros(1, 1).cuda()
             else:
                 R = torch.zeros(1, 1)
                 gae = torch.zeros(1, 1)
                 R2 = torch.zeros(1, 1)
                 gae2 = torch.zeros(1, 1)
+                R_intr = torch.zeros(1, 1)
+                gae_intr = torch.zeros(1, 1)
 
             model_output = None
             if not player.done:
@@ -162,9 +182,12 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 R = value.detach()
                 value2 = model_output[6]
                 R2 = value2.detach()
+                value_intr = model_output[12]
+                R_intr = value_intr.detach()
 
             player.values.append(R)
             player.values2.append(R2)
+            player.values_intr.append(R_intr)
 
             bootstrap_a2_logits = None
             bootstrap_interactor_logits = None
@@ -176,6 +199,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
 
             policy_loss = 0
             value_loss = 0
+            value_loss_intr = 0
             policy_loss2 = 0
             value_loss2 = 0
             interactor_loss = 0
@@ -201,14 +225,24 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     gae2,
                     R2
                 ) = compute_level2_loss_v1(args, player, i, gae2, R2)
+
+                ### int critic
                 value_loss2 = value_loss2 + value_loss2_i
 
+                (
+                    _,
+                    value_loss_intr_i,
+                    _,
+                    gae_intr,
+                    R_intr
+                ) = compute_internal_critic_loss(
+                    args, player, i, gae_intr, R_intr, delta_t2
+                )
+                value_loss_intr = value_loss_intr + value_loss_intr_i
+
                 gae = gae * args.gamma * args.tau + delta_t
-                actor1_gae = (gae + gae2).detach()
-                if args.train_version == 'v2':
-                    l2_gae = gae2.detach()
-                else:
-                    l2_gae = actor1_gae
+                actor1_gae = (gae + gae_intr).detach()
+                l2_gae = gae2.detach()
 
                 policy_loss = (
                     policy_loss
@@ -279,7 +313,8 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 )
                 interactor_loss = interactor_loss + kld_i * l2_gae
 
-            value_loss = value_loss + value_loss2
+            ### total loss value
+            value_loss = value_loss + value_loss2 + value_loss_intr
             beta_term = args.beta_coef * beta_loss
             total_loss = (
                 policy_loss + policy_loss2 + 0.5 * value_loss
