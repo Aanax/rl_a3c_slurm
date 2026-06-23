@@ -31,13 +31,14 @@ def compute_level2_loss_v1(args, player, i, gae2, R2):
     return advantage2, value_loss2_i, delta_t2, gae2, R2
 
 
-def compute_internal_critic_loss(args, player, i, gae_intr, R_intr, delta_t2):
-    R_intr = args.gamma * R_intr + delta_t2
+def compute_internal_critic_loss(args, player, i, gae_intr, R_intr):
+    r_intr = player.values2[i].detach() * (1 - args.gamma)
+    R_intr = args.gamma * R_intr + r_intr
     advantage_intr = R_intr - player.values_intr[i]
     value_loss_intr_i = 0.5 * advantage_intr.pow(2)
 
     delta_intr = (
-        delta_t2
+        r_intr
         + args.gamma * player.values_intr[i + 1].data
         - player.values_intr[i].data
     )
@@ -236,7 +237,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     gae_intr,
                     R_intr
                 ) = compute_internal_critic_loss(
-                    args, player, i, gae_intr, R_intr, delta_t2
+                    args, player, i, gae_intr, R_intr
                 )
                 value_loss_intr = value_loss_intr + value_loss_intr_i
 
