@@ -281,6 +281,11 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     pred_log_dist, target_dist, reduction='batchmean'
                 )
                 policy_loss2 = policy_loss2 + kld_i * l2_gae
+                if args.entropy_coef2 > 0:
+                    policy_loss2 = (
+                        policy_loss2
+                        - (args.entropy_coef2 * player.entropies2[i])
+                    )
 
                 a1_logits_i = player.a1_logits[i]
                 a_21_logits_i = player.a_21_logits[i]

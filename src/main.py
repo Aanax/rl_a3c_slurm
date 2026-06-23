@@ -25,6 +25,7 @@ config.read(sys.argv[1]) #'./configs/run_config.ini'
 args = argparse.Namespace()
 args.lr = config.getfloat('DEFAULT', 'lr', fallback=0.0001)
 args.entropy_coef = config.getfloat('DEFAULT', 'entropy_coef', fallback=0.01)
+args.entropy_coef2 = config.getfloat('DEFAULT', 'entropy_coef2', fallback=0.0)
 args.value_coef = config.getfloat('DEFAULT', 'value_coef', fallback=0.5)
 args.gamma = config.getfloat('DEFAULT', 'gamma', fallback=0.99)
 args.gamma_memory = config.getfloat('DEFAULT', 'gamma_memory', fallback=0.99)
