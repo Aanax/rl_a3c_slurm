@@ -98,3 +98,7 @@ Training logs include:
 ## References
 
 Based on Asynchronous Methods for Deep Reinforcement Learning (Mnih et al., 2016)
+
+
+
+## по две кривых сгаммаа 0 для 1 уровня
