@@ -97,9 +97,12 @@ def parse_args():
     # Model and environment parameters from config
     args.env = cfg.get('DEFAULT', 'env', fallback='PongNoFrameskip-v4')
     args.hidden_size = cfg.getint('DEFAULT', 'hidden_size', fallback=1024)
-    args.gamma = cfg.getfloat('DEFAULT', 'gamma', fallback=0.9)
-    args.gamma_memory = cfg.getfloat('DEFAULT', 'gamma_memory', fallback=0.9)
+    args.gamma = cfg.getfloat('DEFAULT', 'gamma', fallback=0.0)
+    print("Using gamma ", args.gamma)
+    args.gamma_memory = cfg.getfloat('DEFAULT', 'gamma_memory', fallback=0.0)
+    print("Using gamma_memory ", args.gamma_memory)
     args.gamma2 = cfg.getfloat('DEFAULT', 'gamma2', fallback=0.99)
+    print("Using gamma2 ", args.gamma2)
     args.tau = cfg.getfloat('DEFAULT', 'tau', fallback=1.0)
     args.skip_rate = cfg.getint('DEFAULT', 'skip_rate', fallback=4)
     args.max_episode_length = cli.max_episode_length
