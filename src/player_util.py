@@ -27,6 +27,7 @@ class Agent(object):
         self.a1_logits = []
         self.a2_logits = []
         self.a_21_logits = []
+        self.option_terminated = []
         self.betas = []
         self.states = []
         self.done = True
@@ -44,7 +45,8 @@ class Agent(object):
 
         (
             value, logit, self.hx, self.cx, _, _, value2, logit2,
-            a1_logits_i, a_21_logits_i, action2, beta_active, value_intr
+            a1_logits_i, a_21_logits_i, action2, beta_active, value_intr,
+            option_terminated
         ) = model_output
 
         prob = F.softmax(logit, dim=1)
@@ -67,6 +69,7 @@ class Agent(object):
         self.a2_logits.append(logit2)
         self.a1_logits.append(a1_logits_i)
         self.a_21_logits.append(a_21_logits_i)
+        self.option_terminated.append(option_terminated)
         self.betas.append(beta_active)
 
         batch_size = 1
@@ -153,6 +156,7 @@ class Agent(object):
         self.a1_logits = []
         self.a2_logits = []
         self.a_21_logits = []
+        self.option_terminated = []
         self.betas = []
         self.states = []
         return self

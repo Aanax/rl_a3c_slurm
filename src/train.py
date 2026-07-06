@@ -319,6 +319,14 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 )
                 interactor_loss = interactor_loss + kld_i * l2_gae
 
+                if i > 0 and player.option_terminated[i]:
+                    boundary_interactor_logits = (
+                        a1_logits_i.detach() + a_21_logits_i
+                    )
+                    interactor_running_target = F.softmax(
+                        boundary_interactor_logits, dim=1
+                    ).detach()
+
             ### total loss value
             value_loss = value_loss + value_loss2 + value_loss_intr
             beta_term = args.beta_coef * beta_loss

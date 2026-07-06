@@ -180,6 +180,7 @@ class Hierarchial_interactor_options(nn.Module):
 
         if prev_option is None or prev_option.size(0) != a2_probs.size(0):
             a2_sample = a2_probs.multinomial(1)
+            option_terminated = False
         else:
             beta_active = (beta.detach() * prev_option).sum(dim=1, keepdim=True)
             beta_active = beta_active.clamp(0.0, 1.0)
@@ -192,6 +193,7 @@ class Hierarchial_interactor_options(nn.Module):
             prev_idx = prev_option.argmax(dim=1, keepdim=True)
             new_idx = a2_probs.multinomial(1)
             a2_sample = torch.where(terminate.bool(), new_idx, prev_idx)
+            option_terminated = terminate.bool().item()
 
         a2_onehot = torch.zeros_like(a2_probs)
         a2_onehot.scatter_(1, a2_sample, 1.0)
@@ -215,7 +217,8 @@ class Hierarchial_interactor_options(nn.Module):
         combined_logits = a1_logits + a_21_logits.detach()
 
         return (V1, combined_logits, hx, cx, None, None, V2, a2_logits,
-                a1_logits, a_21_logits, a2_sample, beta_active_grad, V_intr)
+                a1_logits, a_21_logits, a2_sample, beta_active_grad, V_intr,
+                option_terminated)
 
 
 class Hierarchial_interactor_options_zeroing_(nn.Module):
@@ -335,6 +338,7 @@ class Hierarchial_interactor_options_zeroing(Hierarchial_interactor_options):
         (
             V1, _, hx, cx, _, _, V2, a2_logits,
             a1_logits, a_21_logits, a2_sample, beta_active_grad, V_intr,
+            option_terminated,
         ) = super().forward(inputs, hx, cx, mem)
 
         a_21_logits = torch.zeros_like(a_21_logits)
@@ -343,6 +347,7 @@ class Hierarchial_interactor_options_zeroing(Hierarchial_interactor_options):
         return (
             V1, combined_logits, hx, cx, None, None, V2, a2_logits,
             a1_logits, a_21_logits, a2_sample, beta_active_grad, V_intr,
+            option_terminated,
         )
 
 
@@ -353,6 +358,7 @@ class Hierarchial_interactor_options_zeroing2(Hierarchial_interactor_options):
         (
             V1, _, hx, cx, _, _, V2, a2_logits,
             a1_logits, a_21_logits, a2_sample, beta_active_grad, V_intr,
+            option_terminated,
         ) = super().forward(inputs, hx, cx, mem)
 
         a1_logits = torch.zeros_like(a1_logits)
@@ -361,5 +367,6 @@ class Hierarchial_interactor_options_zeroing2(Hierarchial_interactor_options):
         return (
             V1, combined_logits, hx, cx, None, None, V2, a2_logits,
             a1_logits, a_21_logits, a2_sample, beta_active_grad, V_intr,
+            option_terminated,
         )
 
