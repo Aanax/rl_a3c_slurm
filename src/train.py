@@ -362,6 +362,12 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             ensure_shared_grads(player.model, shared_model, gpu=gpu_id >= 0)
             optimizer.step()
 
+            # Detach prev_shared at the batch boundary: the model keeps the graph in
+            # prev_shared for within-rollout BPTT (see _SharedFeatureDiffMixin); detaching it
+            # here stops the next batch's first diff from backpropagating into this freed graph.
+            if getattr(player.model, 'prev_shared', None) is not None:
+                player.model.prev_shared = player.model.prev_shared.detach()
+
             # Reset memory for models with memory when starting new batch
             if hasattr(player.model, 'reset_memory'):
                 player.model.reset_memory()

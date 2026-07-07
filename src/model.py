@@ -533,11 +533,11 @@ class Hierarchial_memory_memrelu(nn.Module):
 
 
 class DecoderRules234(nn.Module):
-    def __init__(self, num_inputs, use_rmsnorm=False):
+    def __init__(self, num_inputs, use_rmsnorm=False, latent_dim=64):
         super(DecoderRules234, self).__init__()
         self.use_rmsnorm = use_rmsnorm
         # Mirror of EncoderRules234 convolutions in reverse order.
-        self.deconv4 = nn.ConvTranspose2d(64, 64, 3, stride=1, padding=1)
+        self.deconv4 = nn.ConvTranspose2d(latent_dim, 64, 3, stride=1, padding=1)
         self.deconv3 = nn.ConvTranspose2d(64, 32, 4, stride=1, padding=1)
         self.deconv2 = nn.ConvTranspose2d(32, 32, 5, stride=1, padding=1)
         self.deconv1 = nn.ConvTranspose2d(32, num_inputs, 5, stride=1, padding=2)
@@ -723,21 +723,22 @@ class A3CRules2378OracleFCIntrinsicCritic(A3CRules2378OracleFC):
         return self.critic_linear(x), self.actor_linear(x), hx, cx, x_restored, value_intrinsic
 
 
-class A3CRules2378OracleSplitEncoders(nn.Module):
-    """
-    Oracle topology with:
-    1) one shared encoder
-    2) two branch encoders:
-       - actor+oracle branch
-       - critic branch
+class A3CRules2378OracleNoSplitEncoders(nn.Module):
+    """Oracle topology WITHOUT per-branch encoders (public base, usable as a `model_type`).
 
-    The actor/oracle branch input is chosen by the `_actor_oracle_input` hook (current
-    shared features by default); subclasses/mixins can override it (see
-    _SharedFeatureDiffMixin). Shared encoding lives in `_forward_core` so every variant
-    reuses it.
-    """
+    Pipeline: shared encoder -> `_branch_inputs` routing -> actor/critic heads read the branch
+    features directly (no per-branch conv); the decoder reconstructs from the actor/oracle
+    branch features. Mix in:
+      * `_SplitEncodersMixin`     -> adds the per-branch conv encoders (the classic
+                                     `A3CRules2378OracleSplitEncoders` topology),
+      * `_SharedFeatureDiffMixin` -> diff/concat input routing via actor_input_mode/critic_input_mode,
+      * `_IntrinsicCriticMixin`   -> an extra intrinsic critic head.
+
+    Head/decoder widths follow each branch's input channels (`_*_branch_channels`): 'shared'/'diff'
+    -> 64 ch / 1024 flat, 'concat' -> 128 ch / 2048 flat. Used bare, both heads read the current
+    shared features (64 ch)."""
     def __init__(self, num_inputs, action_space, args):
-        super(A3CRules2378OracleSplitEncoders, self).__init__()
+        super().__init__()
         self.monitor_s = getattr(args, 'monitor_s', False)
         if self.monitor_s:
             self.s_values = []
@@ -745,28 +746,37 @@ class A3CRules2378OracleSplitEncoders(nn.Module):
         use_rmsnorm = getattr(args, 'use_rmsnorm', False)
         self.shared_encoder = EncoderRules234(num_inputs, latent_dim_conv=64, use_rmsnorm=use_rmsnorm)
 
-        # Branch encoders that start from shared features.
-        self.actor_oracle_encoder = nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1)
-        self.critic_encoder = nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1)
+        actor_ch = self._actor_branch_channels()
+        critic_ch = self._critic_branch_channels()
 
-        self.decoder = DecoderRules234(num_inputs, use_rmsnorm=False)
+        # Decoder restores from the actor/oracle branch features (actor_ch channels, 4x4).
+        self.decoder = DecoderRules234(num_inputs, use_rmsnorm=False, latent_dim=actor_ch)
 
         num_outputs = action_space.n
-        self.actor_linear = nn.Linear(1024, num_outputs)
-        self.critic_linear = nn.Linear(1024, 1)
+        self.actor_linear = nn.Linear(actor_ch * 16, num_outputs)
+        self.critic_linear = nn.Linear(critic_ch * 16, 1)
+        self._init_heads()
+        self.train()
 
-        self._init_branch_conv(self.actor_oracle_encoder)
-        self._init_branch_conv(self.critic_encoder)
+    # --- dim hooks: _SplitEncodersMixin overrides these to 64 (its conv output width) ---
+    def _actor_branch_channels(self):
+        return self._mode_channels(getattr(self, 'actor_input_mode', 'shared'))
 
+    def _critic_branch_channels(self):
+        return self._mode_channels(getattr(self, 'critic_input_mode', 'shared'))
+
+    @staticmethod
+    def _mode_channels(mode):
+        return 128 if mode == 'concat' else 64
+
+    def _init_heads(self):
         for linear in [self.critic_linear, self.actor_linear]:
             fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
             std = 1.0 / math.sqrt(fan_in)
             nn.init.normal_(linear.weight, mean=0.0, std=std)
             linear.bias.data.fill_(0)
-
         self.actor_linear.weight.data.mul_(0.01)
         self.critic_linear.weight.data.mul_(1.0)
-        self.train()
 
     @staticmethod
     def _init_branch_conv(conv):
@@ -779,118 +789,137 @@ class A3CRules2378OracleSplitEncoders(nn.Module):
         bound = math.sqrt(3.0) * std
         nn.init.uniform_(conv.weight, -bound, bound)
 
+    # --- routing / encoding hooks (overridable by mixins) ---
     def _branch_inputs(self, shared):
-        """Inputs fed into the (actor/oracle, critic) branches. Base topology feeds the
-        current shared-encoder features to both; _SharedFeatureDiffMixin overrides this to
-        feed the shared+diff concat to the actor/oracle branch (and optionally the same
-        concat to the critic)."""
+        """Inputs for the (actor/oracle, critic) branches. Base feeds current shared to both;
+        _SharedFeatureDiffMixin overrides with diff/concat routing."""
         return shared, shared
 
-    def _forward_core(self, inputs):
-        """Shared encoding pipeline reused by every split-encoder variant.
+    def _encode_actor(self, x):
+        """Base (no split): identity. _SplitEncodersMixin overrides with relu(conv)."""
+        return x
 
-        Returns (actor_oracle_flat, critic_flat, x_restored). The branch inputs come from the
-        `_branch_inputs` hook; the decoder restores from the actor/oracle features."""
+    def _encode_critic(self, x):
+        return x
+
+    def _extra_outputs(self, actor_flat):
+        """Base: no extra head. _IntrinsicCriticMixin overrides to append value_intrinsic."""
+        return ()
+
+    def _forward_core(self, inputs):
         shared, _, _, _ = self.shared_encoder(inputs)
         shared = shared.view(shared.size(0), 64, 4, 4)
 
-        actor_oracle_in, critic_in = self._branch_inputs(shared)
-        actor_oracle_feat = F.relu(self.actor_oracle_encoder(actor_oracle_in))
-        critic_feat = F.relu(self.critic_encoder(critic_in))
+        actor_in, critic_in = self._branch_inputs(shared)
+        actor_feat = self._encode_actor(actor_in)
+        critic_feat = self._encode_critic(critic_in)
 
-        actor_oracle_flat = actor_oracle_feat.view(actor_oracle_feat.size(0), -1)
-        critic_flat = critic_feat.view(critic_feat.size(0), -1)
+        actor_flat = actor_feat.reshape(actor_feat.size(0), -1)
+        critic_flat = critic_feat.reshape(critic_feat.size(0), -1)
 
         if self.monitor_s:
             self.s_values.append(shared.detach().cpu())
 
-        x_restored = self.decoder(actor_oracle_feat)
-        return actor_oracle_flat, critic_flat, x_restored
+        x_restored = self.decoder(actor_feat)
+        return actor_flat, critic_flat, x_restored
 
     def forward(self, inputs, hx, cx, mem=None):
-        actor_oracle_flat, critic_flat, x_restored = self._forward_core(inputs)
+        actor_flat, critic_flat, x_restored = self._forward_core(inputs)
         hx = torch.Tensor([0])
         cx = torch.Tensor([0])
-        return self.critic_linear(critic_flat), self.actor_linear(actor_oracle_flat), hx, cx, x_restored
+        return (
+            self.critic_linear(critic_flat),
+            self.actor_linear(actor_flat),
+            hx,
+            cx,
+            x_restored,
+            *self._extra_outputs(actor_flat),
+        )
+
+
+class _SplitEncodersMixin:
+    """Mixin: adds the per-branch conv encoders (actor/oracle + critic), the classic
+    "split encoders" topology. Each is a Conv2d(branch_in -> 64), so the heads and decoder
+    always see 64 ch / 1024 flat regardless of the input mode. Mix in to the LEFT of the
+    NoSplit base (and to the RIGHT of _SharedFeatureDiffMixin, so the modes are set first)."""
+    def __init__(self, num_inputs, action_space, args):
+        super().__init__(num_inputs, action_space, args)
+        actor_in = self._mode_channels(getattr(self, 'actor_input_mode', 'shared'))
+        critic_in = self._mode_channels(getattr(self, 'critic_input_mode', 'shared'))
+        self.actor_oracle_encoder = nn.Conv2d(actor_in, 64, kernel_size=3, stride=1, padding=1)
+        self.critic_encoder = nn.Conv2d(critic_in, 64, kernel_size=3, stride=1, padding=1)
+        self._init_branch_conv(self.actor_oracle_encoder)
+        self._init_branch_conv(self.critic_encoder)
+
+    # branch convs output 64 ch -> heads/decoder are sized at 64 regardless of input mode
+    def _actor_branch_channels(self):
+        return 64
+
+    def _critic_branch_channels(self):
+        return 64
+
+    def _encode_actor(self, x):
+        return F.relu(self.actor_oracle_encoder(x))
+
+    def _encode_critic(self, x):
+        return F.relu(self.critic_encoder(x))
 
 
 class _IntrinsicCriticMixin:
-    """Mixin: adds an intrinsic critic head (read from the actor/oracle branch) and a
-    6-output forward. Mix in to the LEFT of a split-encoder base class. `isinstance(model,
-    _IntrinsicCriticMixin)` is the canonical "has an intrinsic critic" test (used in
-    train.py / player_util.py).
-
-    Cooperative __init__ builds the base first (via super().__init__), then the intrinsic
-    head."""
+    """Mixin: adds an intrinsic critic head (read from the actor/oracle branch) via a 6th
+    forward output. `isinstance(model, _IntrinsicCriticMixin)` is the canonical "has an
+    intrinsic critic" test (used in train.py / player_util.py). The head is sized to the actor
+    branch flat width, so it works for both split (1024) and no-split concat (2048)."""
     def __init__(self, num_inputs, action_space, args):
         super().__init__(num_inputs, action_space, args)
-        self.critic_linear_intrinsic = nn.Linear(1024, 1)
+        self.critic_linear_intrinsic = nn.Linear(self._actor_branch_channels() * 16, 1)
         fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.critic_linear_intrinsic.weight)
         std = 1.0 / math.sqrt(fan_in)
         nn.init.normal_(self.critic_linear_intrinsic.weight, mean=0.0, std=std)
         self.critic_linear_intrinsic.bias.data.fill_(0)
         self.critic_linear_intrinsic.weight.data.mul_(1.0)
 
-    def forward(self, inputs, hx, cx, mem=None):
-        actor_oracle_flat, critic_flat, x_restored = self._forward_core(inputs)
-        hx = torch.Tensor([0])
-        cx = torch.Tensor([0])
-        value_intrinsic = self.critic_linear_intrinsic(actor_oracle_flat)
-        return (
-            self.critic_linear(critic_flat),
-            self.actor_linear(actor_oracle_flat),
-            hx,
-            cx,
-            x_restored,
-            value_intrinsic,
-        )
+    def _extra_outputs(self, actor_flat):
+        return (self.critic_linear_intrinsic(actor_flat),)
 
 
 class _SharedFeatureDiffMixin:
-    """Mixin: routes the temporal difference of shared-encoder features into the split-encoder
-    branches. Per-branch routing is config-driven via `actor_input_mode` / `critic_input_mode`
-    (from args), each one of:
+    """Mixin: routes per-branch inputs via the temporal difference of shared-encoder features.
+    Config-driven by `actor_input_mode` / `critic_input_mode` (from args), each one of:
         'shared' -> current shared features          (64 ch)
         'diff'   -> shared_cur - prev_shared         (64 ch)
         'concat' -> concat([shared, diff])           (128 ch, appearance + motion)
-    Defaults: actor 'concat', critic 'shared'. Mix in to the LEFT of a split-encoder base.
+    Defaults: actor 'concat', critic 'shared'. Mix in to the LEFT of the base.
 
-    Each branch encoder's input width is rebuilt to match its mode (128 for 'concat', else 64;
-    the base builds both as 64->64, so only 'concat' branches are rebuilt).
-
-    `prev_shared` is per-worker model state (each train worker holds a local model copy),
-    stored detached (no BPTT across steps) and reset to None at episode boundaries (see
-    player_util), so the first frame of an episode yields a zero diff ("previous == current").
-    For 'concat' the appearance half (shared) still carries information on that first frame.
-    Declared as a class attribute so hasattr(model, 'prev_shared') is True for the reset."""
+    Modes are set BEFORE super().__init__() so the base/split can size heads, decoder, and
+    branch convs by mode. `prev_shared` is per-worker model state (each train worker holds a
+    local model copy), reset to None at episode boundaries (see player_util) so the first frame
+    of an episode yields a zero diff. It keeps the graph (no per-step detach), so the diff also
+    backprops through the previous step (within-rollout BPTT); train.py detaches it at the batch
+    boundary so the next batch's first diff doesn't backprop into the freed graph. Declared as a
+    class attribute so hasattr(model, 'prev_shared') is True for the reset."""
     prev_shared = None
     _VALID_MODES = ('shared', 'diff', 'concat')
 
     def __init__(self, num_inputs, action_space, args):
-        super().__init__(num_inputs, action_space, args)
         self.actor_input_mode = getattr(args, 'actor_input_mode', 'concat')
         self.critic_input_mode = getattr(args, 'critic_input_mode', 'shared')
         assert self.actor_input_mode in self._VALID_MODES, f"bad actor_input_mode: {self.actor_input_mode}"
         assert self.critic_input_mode in self._VALID_MODES, f"bad critic_input_mode: {self.critic_input_mode}"
-        # The base builds both branch encoders as 64->64 ('shared'/'diff' width); rebuild a
-        # branch's encoder to 128->64 only when its mode is 'concat'.
-        if self._mode_channels(self.actor_input_mode) != 64:
-            self.actor_oracle_encoder = nn.Conv2d(128, 64, kernel_size=3, stride=1, padding=1)
-            self._init_branch_conv(self.actor_oracle_encoder)
-        if self._mode_channels(self.critic_input_mode) != 64:
-            self.critic_encoder = nn.Conv2d(128, 64, kernel_size=3, stride=1, padding=1)
-            self._init_branch_conv(self.critic_encoder)
-
-    @staticmethod
-    def _mode_channels(mode):
-        return 128 if mode == 'concat' else 64
+        super().__init__(num_inputs, action_space, args)
 
     def _branch_inputs(self, shared):
         prev = self.prev_shared
         diff = torch.zeros_like(shared) if prev is None else shared - prev
-        self.prev_shared = shared.detach()
+        self.prev_shared = shared
         pick = {'shared': shared, 'diff': diff, 'concat': torch.cat([shared, diff], dim=1)}
         return pick[self.actor_input_mode], pick[self.critic_input_mode]
+
+
+# --- Split-encoder variants (classic topology: per-branch conv encoders). Names/configs unchanged. ---
+class A3CRules2378OracleSplitEncoders(_SplitEncodersMixin, A3CRules2378OracleNoSplitEncoders):
+    """Oracle split topology: NoSplit base + per-branch conv encoders (actor/oracle, critic)."""
+    pass
 
 
 class A3CRules2378OracleSplitEncodersIntrinsicCritic(_IntrinsicCriticMixin, A3CRules2378OracleSplitEncoders):
@@ -899,16 +928,24 @@ class A3CRules2378OracleSplitEncodersIntrinsicCritic(_IntrinsicCriticMixin, A3CR
 
 
 class A3CRules2378OracleSplitEncodersSharedDiff(_SharedFeatureDiffMixin, A3CRules2378OracleSplitEncoders):
-    """Split-encoder oracle model where the actor/oracle branch consumes the current shared
-    features concatenated with their temporal difference (appearance + motion), while the
-    critic branch consumes the current shared features."""
+    """Split-encoder oracle model with diff/concat input routing (actor_input_mode /
+    critic_input_mode); branch convs reduce each input back to 64 ch."""
     pass
 
 
 class A3CRules2378OracleSplitEncodersSharedDiffIntrinsicCritic(_SharedFeatureDiffMixin, _IntrinsicCriticMixin, A3CRules2378OracleSplitEncoders):
-    """SharedDiff variant with an additional intrinsic critic head (flat composition of the
-    diff and intrinsic-critic mixins on the split-encoder base).
+    """SharedDiff split-encoder variant with an additional intrinsic critic head."""
+    pass
 
-    MRO note: forward resolves to _IntrinsicCriticMixin (the diff mixin defines no forward,
-    so 6 outputs); _actor_oracle_input resolves to _SharedFeatureDiffMixin (shared+diff concat)."""
+
+# --- No-split variants (heads read shared/diff/concat directly; no per-branch conv). ---
+class A3CRules2378OracleNoSplitSharedDiff(_SharedFeatureDiffMixin, A3CRules2378OracleNoSplitEncoders):
+    """No-split oracle model with diff/concat input routing. With actor_input_mode=concat /
+    critic_input_mode=concat this is the no-split + concat topology (heads read the 128-ch
+    shared+diff concat directly, 2048 flat; decoder restores from the 128-ch concat)."""
+    pass
+
+
+class A3CRules2378OracleNoSplitSharedDiffIntrinsicCritic(_SharedFeatureDiffMixin, _IntrinsicCriticMixin, A3CRules2378OracleNoSplitEncoders):
+    """No-split SharedDiff variant with an additional intrinsic critic head."""
     pass

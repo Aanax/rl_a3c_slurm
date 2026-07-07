@@ -175,6 +175,7 @@ def run_evaluation(net, env, args):
         model_module.A3CRules2378OracleFCIntrinsicCritic,
         model_module.A3CRules2378OracleSplitEncoders,
         model_module.A3CRules2378OracleSplitEncodersIntrinsicCritic,
+        model_module.A3CRules2378OracleNoSplitEncoders,
     )
     
     all_episodes_data = []
