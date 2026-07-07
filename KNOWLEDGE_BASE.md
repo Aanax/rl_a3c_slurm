@@ -42,7 +42,7 @@ Solutions
 
 Rmsnorm after encoder1?
 
-use crossentropy explicitly instead of KL - sum(p ln q)
+use crossentropy explicitly instead of KL - sum(p ln q) [DONE] ce_i = -(target_prob * pred_log_prob).sum(dim=1).mean()
 
 make last run not change options!
 
