@@ -32,3 +32,18 @@ U(-bound,bound)
 ----------
 ветка 2level_try1
 пробую сделать 2 уровня из 2378 noRMS batch 32
+
+
+
+-------
+Solutions
+
+Дельты через адвантадж (альтернатива - одношаговые ТД) [DONE] delta = advantage.detach(), используется вместо gae (убрано накопление gae*gamma*tau)
+
+Rmsnorm after encoder1?
+
+use crossentropy explicitly instead of KL - sum(p ln q)
+
+make last run not change options!
+
+per option bootstrap for interactor

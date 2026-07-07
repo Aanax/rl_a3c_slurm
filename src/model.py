@@ -204,12 +204,12 @@ class Hierarchial_interactor_options(nn.Module):
         else:
             beta_active_grad = torch.zeros(
                 beta.size(0), 1, device=beta.device, dtype=beta.dtype
-            )
+            ) #TODO how grds compute
 
         a_21_logits = self.interactor(a2_onehot)
 
         s_flat = s.view(s.size(0), -1)
-        s_flat = F.relu(s_flat)
+        # s_flat = F.relu(s_flat)
         a1_logits = self.actor_linear(s_flat)
         V1 = self.critic_linear(s_flat)
         V_intr = self.critic_linear_intr(s_flat)
