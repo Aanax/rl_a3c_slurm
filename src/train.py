@@ -153,13 +153,10 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             if not player.done:
                 state = player.state
 
-                saved_option = player.model.current_option
-
                 model_output = player.model(
-                    state.unsqueeze(0), player.hx, player.cx, None
+                    state.unsqueeze(0), player.hx, player.cx, None,
+                    bootstrap_only=True
                 )
-
-                player.model.current_option = saved_option
 
                 value = model_output[0]
                 R = value.detach()
@@ -187,8 +184,25 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             value_loss2 = 0
             interactor_loss = 0
             beta_loss = 0
-            interactor_running_target = None
-            level2_running_target = None
+            last_idx = len(player.rewards) - 1
+            if bootstrap_a2_logits is not None:
+                init_a2_logits = bootstrap_a2_logits
+            else:
+                init_a2_logits = player.a2_logits[last_idx]
+            level2_running_target = F.softmax(
+                init_a2_logits, dim=1
+            ).detach()
+
+            if bootstrap_interactor_logits is not None:
+                init_interactor_logits = bootstrap_interactor_logits
+            else:
+                init_interactor_logits = (
+                    player.a1_logits[last_idx].detach()
+                    + player.a_21_logits[last_idx]
+                )
+            interactor_running_target = F.softmax(
+                init_interactor_logits, dim=1
+            ).detach()
 
             for i in reversed(range(len(player.rewards))):
                 R = args.gamma * R + player.rewards[i]
@@ -231,17 +245,6 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
 
                 a2_logits_i = player.a2_logits[i]
 
-                if level2_running_target is None:
-                    init_a2_logits = (
-                        bootstrap_a2_logits
-                        if bootstrap_a2_logits is not None
-                        else a2_logits_i
-                    )
-                    level2_running_target = F.softmax(
-                        init_a2_logits, dim=1
-                    ).detach()
-                # else:
-
                 sampled_target = sampled_action_target(
                     player.actions2[i],
                     a2_logits_i,
@@ -263,17 +266,6 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
 
                 a1_logits_i = player.a1_logits[i]
                 a_21_logits_i = player.a_21_logits[i]
-
-                if interactor_running_target is None:
-                    if bootstrap_interactor_logits is not None:
-                        init_interactor_logits = bootstrap_interactor_logits
-                    else:
-                        init_interactor_logits = (
-                            a1_logits_i.detach() + a_21_logits_i
-                        )
-                    interactor_running_target = F.softmax(
-                        init_interactor_logits, dim=1
-                    ).detach() #вынести за цикл, else:?
 
                 sampled_target = sampled_action_target(
                     player.actions[i],
