@@ -194,16 +194,10 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             ).detach()
 
             if bootstrap_interactor_logits is not None:
-                # Legit bootstrap: the currently active option may keep
-                # playing into the next batch, so its own predicted
-                # continuation is real information.
                 interactor_running_target = F.softmax(
                     bootstrap_interactor_logits, dim=1
                 ).detach()
             else:
-                # Episode ended: no continuation to bootstrap from, the
-                # trailing option's target will be seeded from its own
-                # actions only (see reset logic in the loop below).
                 interactor_running_target = None
 
             for i in reversed(range(len(player.rewards))):
