@@ -46,4 +46,4 @@ use crossentropy explicitly instead of KL - sum(p ln q) [DONE] ce_i = -(target_p
 
 make last run not change options!
 
-per option bootstrap for interactor
+per option bootstrap for interactor [DONE] interactor_running_target resets at real option-change boundaries (compared via player.actions2[i] vs actions2[i-1], not the raw termination-attempt flag)

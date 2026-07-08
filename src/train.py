@@ -194,15 +194,17 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             ).detach()
 
             if bootstrap_interactor_logits is not None:
-                init_interactor_logits = bootstrap_interactor_logits
+                # Legit bootstrap: the currently active option may keep
+                # playing into the next batch, so its own predicted
+                # continuation is real information.
+                interactor_running_target = F.softmax(
+                    bootstrap_interactor_logits, dim=1
+                ).detach()
             else:
-                init_interactor_logits = (
-                    player.a1_logits[last_idx].detach()
-                    + player.a_21_logits[last_idx]
-                )
-            interactor_running_target = F.softmax(
-                init_interactor_logits, dim=1
-            ).detach()
+                # Episode ended: no continuation to bootstrap from, the
+                # trailing option's target will be seeded from its own
+                # actions only (see reset logic in the loop below).
+                interactor_running_target = None
 
             for i in reversed(range(len(player.rewards))):
                 R = args.gamma * R + player.rewards[i]
@@ -271,10 +273,15 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     player.actions[i],
                     a_21_logits_i,
                 )
-                interactor_running_target = (
-                    args.gamma2 * interactor_running_target
-                    + (1 - args.gamma2) * sampled_target
-                ).detach() #TODO
+                if interactor_running_target is None:
+                    # First step of an isolated option segment: no
+                    # continuation from a different option is mixed in.
+                    interactor_running_target = sampled_target.detach()
+                else:
+                    interactor_running_target = (
+                        args.gamma2 * interactor_running_target
+                        + (1 - args.gamma2) * sampled_target
+                    ).detach()
 
                 target_prob = interactor_running_target
                 pred_log_prob = F.log_softmax(
@@ -283,13 +290,16 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 ce_i = -(target_prob * pred_log_prob).sum(dim=1).mean()
                 interactor_loss = interactor_loss + ce_i * l2_delta
 
-                if i > 0 and player.option_terminated[i]:
-                    boundary_interactor_logits = (
-                        a1_logits_i.detach() + a_21_logits_i #i-1
-                    )
-                    interactor_running_target = F.softmax(
-                        boundary_interactor_logits, dim=1
-                    ).detach() #todo
+                option_changed = (
+                    i > 0
+                    and player.actions2[i].item() != player.actions2[i - 1].item()
+                )
+                if option_changed:
+                    # The option genuinely ends here: don't let its own
+                    # prediction leak into the older, different option's
+                    # target. That segment starts fresh from its own
+                    # actions in the next iteration.
+                    interactor_running_target = None
 
             ### total loss value
             value_loss = value_loss + value_loss2 + value_loss_intr
