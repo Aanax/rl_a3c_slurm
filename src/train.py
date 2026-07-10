@@ -268,9 +268,15 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     a_21_logits_i,
                 )
                 if interactor_running_target is None:
-                    # First step of an isolated option segment: no
-                    # continuation from a different option is mixed in.
-                    interactor_running_target = sampled_target.detach()
+                    if i + 1 < len(player.a1_logits):
+                        hypothetical_logits = (
+                            player.a1_logits[i + 1].detach() + a_21_logits_i
+                        )
+                        interactor_running_target = F.softmax(
+                            hypothetical_logits, dim=1
+                        ).detach()
+                    else:
+                        interactor_running_target = sampled_target.detach()
                 else:
                     interactor_running_target = (
                         args.gamma2 * interactor_running_target
@@ -289,10 +295,6 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     and player.actions2[i].item() != player.actions2[i - 1].item()
                 )
                 if option_changed:
-                    # The option genuinely ends here: don't let its own
-                    # prediction leak into the older, different option's
-                    # target. That segment starts fresh from its own
-                    # actions in the next iteration.
                     interactor_running_target = None
 
             ### total loss value
