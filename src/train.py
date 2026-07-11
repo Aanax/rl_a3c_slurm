@@ -252,7 +252,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
 
                 target_prob = level2_running_target
                 pred_log_prob = F.log_softmax(a2_logits_i, dim=1)
-                ce_i = -(target_prob * pred_log_prob).sum(dim=1).mean()
+                ce_i = -(target_prob * pred_log_prob).sum(dim=1)
                 policy_loss2 = policy_loss2 + ce_i * l2_delta
                 if args.entropy_coef2 > 0:
                     policy_loss2 = (
@@ -287,7 +287,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 pred_log_prob = F.log_softmax(
                     a1_logits_i.detach() + a_21_logits_i, dim=1
                 )
-                ce_i = -(target_prob * pred_log_prob).sum(dim=1).mean()
+                ce_i = -(target_prob * pred_log_prob).sum(dim=1)
                 interactor_loss = interactor_loss + ce_i * l2_delta
 
                 option_changed = (
