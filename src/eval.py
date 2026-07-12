@@ -108,6 +108,7 @@ def parse_args():
     args.max_episode_length = cli.max_episode_length
     args.input_normalization_class = cfg.get('DEFAULT', 'input_normalization_class', fallback='NormalizedEnv')
     args.model_type = cfg.get('DEFAULT', 'model_type', fallback='Hierarchial_interactor_options')
+    args.num_options = cfg.getint('DEFAULT', 'num_options', fallback=8)
     args.env_config = cfg.get('DEFAULT', 'env_config', fallback='configs/envs_config.json')
     args.normalization_alpha = cfg.getfloat('DEFAULT', 'normalization_alpha', fallback=0.9999)
     args.monitor_s = False

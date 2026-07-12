@@ -100,7 +100,7 @@ class Hierarchial_interactor_options(nn.Module):
 
         num_outputs = action_space.n
         self.num_outputs = num_outputs
-        self.num_options = 8
+        self.num_options = getattr(args, 'num_options', 8)
 
         use_rmsnorm = getattr(args, 'use_rmsnorm', False)
         self.level1_encoder = EncoderRules234(num_inputs, latent_dim_conv=64, use_rmsnorm=use_rmsnorm)
