@@ -21,11 +21,13 @@ Usage (cluster - outputs to logs/ folder):
 Output format (saved as .npy files):
     Frames_normalized_orig.npy - Preprocessed frames (N, C, H, W)
     Q11s.npy - Level 1 logits (N, num_actions)
-    Q22s.npy - Level 2 logits (N, 16) 
+    Q22s.npy - Level 2 logits (N, num_options) 
     aas.npy - Selected actions (N, 1)
     betas.npy - Per-option termination betas (N, num_options), if use_beta_termination
     beta_logits.npy - Pre-sigmoid beta logits (N, num_options), if use_beta_termination
     beta_active.npy - Active termination beta for current option (N, 1), if use_beta_termination
+    oos.npy - Option indices actually played (N, 1)  [NEW]
+    beta_samples.npy - Bernoulli terminate samples 0/1 (N, 1), if use_beta_termination  [NEW]
     rewards.npy - Rewards (N,)
     Vs.npy - Level 1 values (N, 1)
     Vs2.npy - Level 2 values (N, 1)
@@ -223,6 +225,8 @@ def run_evaluation(net, env, args):
         betas = []  # Per-option termination betas
         beta_logits = []  # Pre-sigmoid beta logits
         beta_active = []  # Active termination beta for current option
+        oos = []  # NEW: options actually played
+        beta_samples = []  # NEW: Bernoulli terminate samples (0/1)
         rewards = []  # Rewards received
         Vs = []  # Level 1 values
         Vs2 = []  # Level 2 values
@@ -244,12 +248,17 @@ def run_evaluation(net, env, args):
             
             # Parse model output:
             # (V1, combined_logits, hx, cx, None, None, V2, a2_logits,
-            #  a1_logits, a_21_logits, a2_sample, beta_active)
+            #  a1_logits, a_21_logits, a2_sample, beta_active, V_intr,
+            #  option_terminated)
             V1 = model_output[0]
             a1_logits = model_output[1]
             V2 = model_output[6]
             a2_logits = model_output[7]
+            a2_sample = model_output[10]
             beta_active_step = model_output[11]
+            option_terminated = (
+                model_output[13] if len(model_output) > 13 else False
+            )
             
             # Get action probabilities and select action (greedy)
             prob = F.softmax(a1_logits, dim=1)
@@ -262,10 +271,16 @@ def run_evaluation(net, env, args):
             Q11s.append(a1_logits.cpu().numpy()[0])  # Level 1 logits
             Q22s.append(a2_logits.cpu().numpy()[0])  # Level 2 logits (16-dim)
             aas.append([action])  # Action taken
+            oos.append(a2_sample.cpu().numpy()[0])  # NEW: option actually played
             if log_beta:
                 betas.append(net.beta_values[-1].numpy()[0])
                 beta_logits.append(net.last_beta_logits.cpu().numpy()[0])
                 beta_active.append(beta_active_step.cpu().numpy()[0])
+                if torch.is_tensor(option_terminated):
+                    beta_sample = float(option_terminated.item())
+                else:
+                    beta_sample = 1.0 if option_terminated else 0.0
+                beta_samples.append([beta_sample])  # NEW: sampled terminate
             Vs.append(V1.cpu().numpy()[0])  # Level 1 value
             Vs2.append(V2.cpu().numpy()[0])  # Level 2 value
             
@@ -298,6 +313,7 @@ def run_evaluation(net, env, args):
             'Q11s': np.array(Q11s),
             'Q22s': np.array(Q22s),
             'aas': np.array(aas),
+            'oos': np.array(oos),
             'rewards': np.array(rewards),
             'Vs': np.array(Vs),
             'Vs2': np.array(Vs2),
@@ -306,6 +322,7 @@ def run_evaluation(net, env, args):
             episode_data['betas'] = np.array(betas)
             episode_data['beta_logits'] = np.array(beta_logits)
             episode_data['beta_active'] = np.array(beta_active)
+            episode_data['beta_samples'] = np.array(beta_samples)
         
         if frames_render:
             episode_data['frames_render'] = frames_render

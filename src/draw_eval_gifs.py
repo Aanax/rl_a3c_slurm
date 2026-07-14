@@ -3,7 +3,7 @@ draw_eval_gifs.py — Download evaluation results from remote server and create 
 
 This script downloads evaluation artifacts from a remote server (via SSH/SFTP),
 then creates two MP4 videos:
-  1. actions.mp4 - Shows Q-values for level1, level2, and beta (or actions if no beta)
+  1. actions.mp4 - Shows logits1, option actually played, and sampled beta
   2. VS_short.mp4 - Shows V1, V2 values and rewards over time
 
 Usage:
@@ -292,7 +292,8 @@ def download_eval_files(eval_folder, local_dir, server, username, remote_project
     
     # Files we need to download (matching the old naming convention)
     needed_suffixes = [
-        'Q11s.npy', 'Q22s.npy', 'Q21s.npy', 'aas.npy', 'betas.npy', 'beta_logits.npy', 'beta_active.npy',
+        'Q11s.npy', 'Q22s.npy', 'Q21s.npy', 'aas.npy', 'oos.npy',
+        'betas.npy', 'beta_logits.npy', 'beta_active.npy', 'beta_samples.npy',
         'Frames_normalized_orig.npy', 'Vs.npy', 'Vs2.npy',
         'rewards.npy', 'gs2.npy', 'gs1.npy', 'ss.npy', 'ss2.npy'
     ]
@@ -360,9 +361,11 @@ def load_eval_data(eval_folder, local_dir):
         'Q11s.npy': 'Q_int',      # Level 1 logits (intrinsic/mixed)
         'Q22s.npy': 'Q_ext',      # Level 2 logits (extrinsic)
         'aas.npy': 'action',      # Selected actions
+        'oos.npy': 'option',      # NEW: option indices actually played
         'betas.npy': 'betas',     # Per-option termination betas
         'beta_logits.npy': 'beta_logits',  # Pre-sigmoid beta logits
         'beta_active.npy': 'beta_active',  # Active termination beta
+        'beta_samples.npy': 'beta_samples',  # NEW: Bernoulli terminate samples
         'Vs.npy': 'Vs',           # Level 1 values
         'Vs2.npy': 'Vs2',         # Level 2 values
         'rewards.npy': 'rewards', # Rewards
@@ -388,7 +391,7 @@ def load_eval_data(eval_folder, local_dir):
 
 def create_action_gif(data, eval_folder, local_dir, fps=3, start_idx=0, stop_idx=300, window_size=34):
     """
-    Create actions visualization MP4 showing Q-values and beta or selected actions.
+    Create actions visualization MP4 showing logits1, played option, and sampled beta.
     """
     print("\n[draw] Creating actions visualization...")
     
@@ -401,13 +404,20 @@ def create_action_gif(data, eval_folder, local_dir, fps=3, start_idx=0, stop_idx
     Q_int = data.get('Q_int', None)
     Q_ext = data.get('Q_ext', None)
     actions = data.get('action', None)
+    options = data.get('option', None)
     betas = data.get('betas', None)
     beta_active = data.get('beta_active', None)
+    beta_samples = data.get('beta_samples', None)
     
     if Q_int is not None:
         print(f"[draw] Q_int shape: {Q_int.shape}, range: [{np.min(Q_int):.2f}, {np.max(Q_int):.2f}]")
     if Q_ext is not None:
         print(f"[draw] Q_ext shape: {Q_ext.shape}, range: [{np.min(Q_ext):.2f}, {np.max(Q_ext):.2f}]")
+    if options is not None:
+        print(f"[draw] Options shape: {options.shape}, range: [{np.min(options)}, {np.max(options)}]")
+    if beta_samples is not None:
+        print(f"[draw] Beta_samples shape: {beta_samples.shape}, "
+              f"mean terminate={np.mean(beta_samples):.3f}")
     if betas is not None:
         print(f"[draw] Betas shape: {betas.shape}, range: [{np.min(betas):.2f}, {np.max(betas):.2f}]")
     if beta_active is not None:
@@ -415,15 +425,45 @@ def create_action_gif(data, eval_folder, local_dir, fps=3, start_idx=0, stop_idx
     if actions is not None:
         print(f"[draw] Actions shape: {actions.shape}")
     
-    # Build values dict
+    # Build values dict: logits1, option2 played, beta sampled
     values_dict = {}
-    if Q_ext is not None:
-        # Q22s = level 2 logits (16-dim for a2)
-        values_dict['logits2 (level2)'] = {'value': Q_ext, 'legend': [str(i) for i in range(Q_ext.shape[1])]}
     if Q_int is not None:
         # Q11s = level 1 logits (action space dim for a1)
-        values_dict['logits1 (level1)'] = {'value': Q_int, 'legend': action_legend[:Q_int.shape[1]] if len(Q_int.shape) > 1 else action_legend}
-    if betas is not None:
+        values_dict['logits1 (level1)'] = {
+            'value': Q_int,
+            'legend': action_legend[:Q_int.shape[1]] if len(Q_int.shape) > 1 else action_legend,
+        }
+    if options is not None:
+        options_flat = np.squeeze(options)
+        if options_flat.ndim == 1:
+            options_flat = options_flat.reshape(-1, 1)
+        n_opts = int(np.max(options_flat)) + 1 if options_flat.size else 1
+        values_dict['option2 (played)'] = {
+            'value': options_flat,
+            'legend': ['option'],
+            'ylim': (-0.5, max(n_opts - 0.5, 0.5)),
+            'plot_style': 'dots',
+            'markersize': 7,
+        }
+    elif Q_ext is not None:
+        # Fallback for older evals without oos.npy
+        values_dict['logits2 (level2)'] = {
+            'value': Q_ext,
+            'legend': [str(i) for i in range(Q_ext.shape[1])],
+        }
+    if beta_samples is not None:
+        beta_samples_flat = np.squeeze(beta_samples)
+        if beta_samples_flat.ndim == 1:
+            beta_samples_flat = beta_samples_flat.reshape(-1, 1)
+        values_dict['beta (sampled terminate)'] = {
+            'value': beta_samples_flat,
+            'legend': ['terminate'],
+            'ylim': (-0.1, 1.1),
+            'plot_style': 'dots',
+            'markersize': 7,
+        }
+    elif betas is not None:
+        # Fallback for older evals without beta_samples.npy
         beta_panel = {
             'value': betas,
             'legend': [f'opt{i}' for i in range(betas.shape[1])],
