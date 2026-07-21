@@ -25,17 +25,6 @@ def compute_level2_loss_v1(args, player, i, R2):
     return advantage2, value_loss2_i, delta2, R2
 
 
-def compute_internal_critic_loss(args, player, i, R_intr):
-    r_intr = player.values2[i].detach() * (1 - args.gamma)
-    R_intr = args.gamma * R_intr + r_intr
-    advantage_intr = R_intr - player.values_intr[i]
-    value_loss_intr_i = 0.5 * advantage_intr.pow(2)
-
-    delta_intr = advantage_intr.detach()
-
-    return advantage_intr, value_loss_intr_i, delta_intr, R_intr
-
-
 def sampled_action_target(action, logits): #rename
     target = torch.zeros_like(logits)
     return target.scatter(1, action, 1.0)
@@ -58,7 +47,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
     env.seed(args.seed + rank)
     player = Agent(None, env, args, None)
     player.gpu_id = gpu_id
-    player.model = model.Hierarchial_interactor_options(
+    player.model = getattr(model, args.model_type)(
         player.env.observation_space.shape[0], player.env.action_space, args
     )
 
@@ -143,11 +132,9 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 with torch.cuda.device(gpu_id):
                     R = torch.zeros(1, 1).cuda()
                     R2 = torch.zeros(1, 1).cuda()
-                    R_intr = torch.zeros(1, 1).cuda()
             else:
                 R = torch.zeros(1, 1)
                 R2 = torch.zeros(1, 1)
-                R_intr = torch.zeros(1, 1)
 
             model_output = None
             if not player.done:
@@ -162,27 +149,18 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 R = value.detach()
                 value2 = model_output[6]
                 R2 = value2.detach()
-                value_intr = model_output[12]
-                R_intr = value_intr.detach()
 
             player.values.append(R)
             player.values2.append(R2)
-            player.values_intr.append(R_intr)
 
             bootstrap_a2_logits = None
-            bootstrap_interactor_logits = None
             if model_output is not None:
                 bootstrap_a2_logits = model_output[7]
-                bootstrap_interactor_logits = (
-                    model_output[8].detach() + model_output[9]
-                )
 
             policy_loss = 0
             value_loss = 0
-            value_loss_intr = 0
             policy_loss2 = 0
             value_loss2 = 0
-            interactor_loss = 0
             beta_loss = 0
             last_idx = len(player.rewards) - 1
             if bootstrap_a2_logits is not None:
@@ -193,12 +171,16 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 init_a2_logits, dim=1
             ).detach()
 
-            if bootstrap_interactor_logits is not None:
-                interactor_running_target = F.softmax(
-                    bootstrap_interactor_logits, dim=1
-                ).detach()
-            else:
-                interactor_running_target = None
+            # betas[i] terminates the option from step i-1, so it is trained
+            # against l2_delta from step i-1. The loop runs backwards, so
+            # l2_delta[i-1] is only computed on the *next* iteration; defer
+            # applying betas[i] until then via pending_beta.
+
+
+
+
+            
+            pending_beta = None
 
             for i in reversed(range(len(player.rewards))):
                 R = args.gamma * R + player.rewards[i]
@@ -214,20 +196,9 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     R2
                 ) = compute_level2_loss_v1(args, player, i, R2)
 
-                ### int critic
                 value_loss2 = value_loss2 + value_loss2_i
 
-                (
-                    _,
-                    value_loss_intr_i,
-                    delta_intr,
-                    R_intr
-                ) = compute_internal_critic_loss(
-                    args, player, i, R_intr
-                )
-                value_loss_intr = value_loss_intr + value_loss_intr_i
-
-                actor1_delta = delta + delta_intr
+                actor1_delta = delta + delta2
                 l2_delta = delta2
 
                 policy_loss = (
@@ -236,8 +207,9 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     - (args.entropy_coef * player.entropies[i])
                 )
 
-                beta_adv = l2_delta
-                beta_loss = beta_loss + player.betas[i] * beta_adv
+                if pending_beta is not None:
+                    beta_loss = beta_loss + pending_beta * l2_delta
+                pending_beta = player.betas[i]
 
                 a2_logits_i = player.a2_logits[i]
 
@@ -260,49 +232,12 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                         - (args.entropy_coef2 * player.entropies2[i])
                     )
 
-                a1_logits_i = player.a1_logits[i]
-                a_21_logits_i = player.a_21_logits[i]
-
-                sampled_target = sampled_action_target(
-                    player.actions[i],
-                    a_21_logits_i,
-                )
-                if interactor_running_target is None:
-                    if i + 1 < len(player.a1_logits):
-                        hypothetical_logits = (
-                            player.a1_logits[i + 1].detach() + a_21_logits_i
-                        )
-                        interactor_running_target = F.softmax(
-                            hypothetical_logits, dim=1
-                        ).detach()
-                    else:
-                        interactor_running_target = sampled_target.detach()
-                else:
-                    interactor_running_target = (
-                        args.gamma2 * interactor_running_target
-                        + (1 - args.gamma2) * sampled_target
-                    ).detach()
-
-                target_prob = interactor_running_target
-                pred_log_prob = F.log_softmax(
-                    a1_logits_i.detach() + a_21_logits_i, dim=1
-                )
-                ce_i = -(target_prob * pred_log_prob).sum(dim=1)
-                interactor_loss = interactor_loss + ce_i * l2_delta
-
-                option_changed = (
-                    i > 0
-                    and player.actions2[i].item() != player.actions2[i - 1].item()
-                )
-                if option_changed:
-                    interactor_running_target = None
-
             ### total loss value
-            value_loss = value_loss + value_loss2 + value_loss_intr
+            value_loss = value_loss + value_loss2
             beta_term = args.beta_coef * beta_loss
             total_loss = (
                 policy_loss + policy_loss2 + 0.5 * value_loss
-                + interactor_loss + beta_term
+                + beta_term
             )
 
             player.model.zero_grad()

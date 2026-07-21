@@ -16,7 +16,6 @@ class Agent(object):
         self.args = args
         self.values = []
         self.values2 = []
-        self.values_intr = []
         self.log_probs = []
         self.log_probs2 = []
         self.rewards = []
@@ -24,9 +23,7 @@ class Agent(object):
         self.entropies2 = []
         self.actions = []
         self.actions2 = []
-        self.a1_logits = []
         self.a2_logits = []
-        self.a_21_logits = []
         self.option_terminated = []
         self.betas = []
         self.states = []
@@ -45,8 +42,7 @@ class Agent(object):
 
         (
             value, logit, self.hx, self.cx, _, _, value2, logit2,
-            a1_logits_i, a_21_logits_i, action2, beta_active, value_intr,
-            option_terminated
+            action2, beta_active, option_terminated
         ) = model_output
 
         prob = F.softmax(logit, dim=1)
@@ -64,11 +60,8 @@ class Agent(object):
         log_prob2 = log_prob2.gather(1, action2)
         self.log_probs2.append(log_prob2)
         self.values2.append(value2)
-        self.values_intr.append(value_intr)
         self.actions2.append(action2)
         self.a2_logits.append(logit2)
-        self.a1_logits.append(a1_logits_i)
-        self.a_21_logits.append(a_21_logits_i)
         self.option_terminated.append(option_terminated)
         self.betas.append(beta_active)
 
@@ -145,7 +138,6 @@ class Agent(object):
     def clear_actions(self):
         self.values = []
         self.values2 = []
-        self.values_intr = []
         self.log_probs = []
         self.log_probs2 = []
         self.rewards = []
@@ -153,9 +145,7 @@ class Agent(object):
         self.entropies2 = []
         self.actions = []
         self.actions2 = []
-        self.a1_logits = []
         self.a2_logits = []
-        self.a_21_logits = []
         self.option_terminated = []
         self.betas = []
         self.states = []

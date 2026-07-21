@@ -91,6 +91,13 @@ class EncoderRules234_2(nn.Module):
 
 
 class Hierarchial_interactor_options(nn.Module):
+    """DEPRECATED: superseded by Hierarchial_concat_options.
+
+    Kept only for reproducibility of past runs / comparison. Do not use for
+    new experiments: the interactor + internal critic (V_intr) design was
+    found to be theoretically unjustified (see epic/001_remove_interactor_and_internal_critic.md).
+    New experiments should use Hierarchial_concat_options instead.
+    """
     def __init__(self, num_inputs, action_space, args):
         super(Hierarchial_interactor_options, self).__init__()
         self.hidden_size = args.hidden_size
@@ -229,6 +236,153 @@ class Hierarchial_interactor_options(nn.Module):
         return (V1, combined_logits, hx, cx, None, None, V2, a2_logits,
                 a1_logits, a_21_logits, a2_sample, beta_active_grad, V_intr,
                 option_terminated)
+
+
+class Hierarchial_concat_options(nn.Module):
+    """Options hierarchy without an interactor and without an internal critic.
+
+    Level 2: s2 -> a2 (option policy), s2 -> beta (termination), s2 -> V2.
+    Level 1: concat(s1, a2_onehot) -> a1 (action policy), and the SAME
+             concat(s1, a2_onehot) -> V1 (critic). a2's sampled one-hot is
+             fed as plain (non-differentiable) context to both the level-1
+             actor and the level-1 critic, instead of being combined with
+             a1 through a separate interactor network.
+
+    There is no internal critic (V_intr): the level-1 actor is trained on
+    the sum of its own critic's TD-error (delta) and the level-2 critic's
+    TD-error (delta2), computed directly -- not through a proxy critic that
+    treats V2 as a pseudo-reward for a downstream critic head.
+    """
+
+    def __init__(self, num_inputs, action_space, args):
+        super(Hierarchial_concat_options, self).__init__()
+        self.hidden_size = args.hidden_size
+        self.monitor_s = getattr(args, 'monitor_s', False)
+        if self.monitor_s:
+            self.s_values = []
+
+        num_outputs = action_space.n
+        self.num_outputs = num_outputs
+        self.num_options = getattr(args, 'num_options', 8)
+
+        use_rmsnorm = getattr(args, 'use_rmsnorm', False)
+        self.level1_encoder = EncoderRules234(num_inputs, latent_dim_conv=64, use_rmsnorm=use_rmsnorm)
+        self.level2_encoder = EncoderRules234_2()
+
+        self.critic_linear2 = nn.Linear(32*4*4, 1)
+        self.actor_linear2 = nn.Linear(32*4*4, self.num_options)
+        self.beta_linear = nn.Linear(32*4*4, self.num_options)
+
+        actor1_critic1_in = 64*4*4 + self.num_options
+        self.critic_linear = nn.Linear(actor1_critic1_in, 1)
+        self.actor_linear = nn.Linear(actor1_critic1_in, num_outputs)
+
+        for linear in [self.critic_linear2, self.actor_linear2]:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
+            std = 1.0 / math.sqrt(fan_in)
+            nn.init.normal_(linear.weight, mean=0.0, std=std)
+            linear.bias.data.fill_(0)
+
+        for linear in [self.critic_linear, self.actor_linear]:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
+            std = 1.0 / math.sqrt(fan_in)
+            nn.init.normal_(linear.weight, mean=0.0, std=std)
+            linear.bias.data.fill_(0)
+
+        self.actor_linear.weight.data.mul_(0.01)
+        self.critic_linear.weight.data.mul_(1.0)
+
+        fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.beta_linear.weight)
+        std = 1.0 / math.sqrt(fan_in)
+        nn.init.normal_(self.beta_linear.weight, mean=0.0, std=std)
+        self.beta_linear.weight.data.mul_(0.01)
+        self.beta_linear.bias.data.fill_(0.0)
+
+        self.current_option = None
+        self.last_beta_logits = None
+
+        self.train()
+
+    def forward(self, inputs, hx, cx, mem=None, bootstrap_only=False):
+        """bootstrap_only: mock forward for the last out-of-batch call in train
+        that is only used to read off V1/V2. Must have no side effects:
+        does not sample/terminate options, does not touch self.current_option,
+        and does not write to monitoring buffers.
+        """
+        s, _, _, _ = self.level1_encoder(inputs)
+
+        if self.monitor_s and not bootstrap_only:
+            self.s_values.append(s.detach().cpu())
+
+        hx = torch.Tensor([0])
+        cx = torch.Tensor([0])
+
+        s2 = s
+        s2, _, _, _ = self.level2_encoder(s2)
+        s2_flat = s2.view(s2.size(0), -1)
+        a2_logits = self.actor_linear2(s2_flat)
+        V2 = self.critic_linear2(s2_flat)
+        beta_logits = self.beta_linear(s2_flat)
+        beta = torch.sigmoid(beta_logits)
+        if not bootstrap_only:
+            self.last_beta_logits = beta_logits.detach()
+
+        if getattr(self, 'monitor_beta', False) and not bootstrap_only:
+            if not hasattr(self, 'beta_values'):
+                self.beta_values = []
+            self.beta_values.append(beta.detach().cpu())
+            if not hasattr(self, 'beta_logits_values'):
+                self.beta_logits_values = []
+            self.beta_logits_values.append(beta_logits.detach().cpu())
+
+        a2_probs = F.softmax(a2_logits, dim=1)
+
+        prev_option = self.current_option
+
+        if bootstrap_only and prev_option is not None and prev_option.size(0) == a2_probs.size(0):
+            a2_sample = prev_option.argmax(dim=1, keepdim=True)
+            option_terminated = False
+        elif prev_option is None or prev_option.size(0) != a2_probs.size(0):
+            a2_sample = a2_probs.multinomial(1)
+            option_terminated = False
+        else:
+            beta_active = (beta.detach() * prev_option).sum(dim=1, keepdim=True)
+            beta_active = beta_active.clamp(0.0, 1.0)
+            beta_active = torch.where(
+                torch.isfinite(beta_active),
+                beta_active,
+                torch.full_like(beta_active, 0.5),
+            )
+            terminate = torch.bernoulli(beta_active)
+            prev_idx = prev_option.argmax(dim=1, keepdim=True)
+            new_idx = a2_probs.multinomial(1)
+            a2_sample = torch.where(terminate.bool(), new_idx, prev_idx)
+            option_terminated = terminate.bool().item()
+
+        a2_onehot = torch.zeros_like(a2_probs)
+        a2_onehot.scatter_(1, a2_sample, 1.0)
+        if not bootstrap_only:
+            self.current_option = a2_onehot.detach()
+
+        if prev_option is not None and prev_option.size(0) == a2_probs.size(0):
+            beta_active_grad = (beta * prev_option).sum(dim=1, keepdim=True)
+        else:
+            beta_active_grad = torch.zeros(
+                beta.size(0), 1, device=beta.device, dtype=beta.dtype
+            )
+
+        s_flat = s.view(s.size(0), -1)
+        # a2_onehot carries no gradient back to actor_linear2/beta_linear (it is
+        # constructed via scatter_ with a constant 1.0), so this concatenation
+        # only feeds a2 as context into actor1/critic1, it does not leak
+        # actor1/critic1 gradients back into the level-2 heads.
+        actor1_critic1_in = torch.cat([s_flat, a2_onehot], dim=1)
+
+        a1_logits = self.actor_linear(actor1_critic1_in)
+        V1 = self.critic_linear(actor1_critic1_in)
+
+        return (V1, a1_logits, hx, cx, None, None, V2, a2_logits,
+                a2_sample, beta_active_grad, option_terminated)
 
 
 class Hierarchial_interactor_options_zeroing_(nn.Module):
