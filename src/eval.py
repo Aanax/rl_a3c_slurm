@@ -193,6 +193,38 @@ def _model_uses_beta(net, args):
     return args.use_beta_termination and hasattr(net, 'beta_linear')
 
 
+def _parse_model_output(model_output):
+    """Parse forward() return tuple for interactor vs concat option models.
+
+    Hierarchial_interactor_options returns 14 elements:
+        (V1, combined_logits, hx, cx, None, None, V2, a2_logits,
+         a1_logits, a_21_logits, a2_sample, beta_active, V_intr,
+         option_terminated)
+
+    Hierarchial_concat_options returns 11 elements:
+        (V1, a1_logits, hx, cx, None, None, V2, a2_logits,
+         a2_sample, beta_active, option_terminated)
+    """
+    if len(model_output) <= 11:
+        a2_sample = model_output[8]
+        beta_active = model_output[9]
+        option_terminated = model_output[10] if len(model_output) > 10 else False
+    else:
+        a2_sample = model_output[10]
+        beta_active = model_output[11]
+        option_terminated = model_output[13] if len(model_output) > 13 else False
+
+    return {
+        'V1': model_output[0],
+        'action_logits': model_output[1],
+        'V2': model_output[6],
+        'a2_logits': model_output[7],
+        'a2_sample': a2_sample,
+        'beta_active': beta_active,
+        'option_terminated': option_terminated,
+    }
+
+
 def run_evaluation(net, env, args):
     """
     Run evaluation episode(s) and collect all relevant data.
@@ -246,19 +278,14 @@ def run_evaluation(net, env, args):
             with torch.no_grad():
                 model_output = net(obs_t, torch.zeros(1), torch.zeros(1))
             
-            # Parse model output:
-            # (V1, combined_logits, hx, cx, None, None, V2, a2_logits,
-            #  a1_logits, a_21_logits, a2_sample, beta_active, V_intr,
-            #  option_terminated)
-            V1 = model_output[0]
-            a1_logits = model_output[1]
-            V2 = model_output[6]
-            a2_logits = model_output[7]
-            a2_sample = model_output[10]
-            beta_active_step = model_output[11]
-            option_terminated = (
-                model_output[13] if len(model_output) > 13 else False
-            )
+            parsed = _parse_model_output(model_output)
+            V1 = parsed['V1']
+            a1_logits = parsed['action_logits']
+            V2 = parsed['V2']
+            a2_logits = parsed['a2_logits']
+            a2_sample = parsed['a2_sample']
+            beta_active_step = parsed['beta_active']
+            option_terminated = parsed['option_terminated']
             
             # Get action probabilities and select action (greedy)
             prob = F.softmax(a1_logits, dim=1)
