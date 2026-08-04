@@ -44,6 +44,20 @@ def _action_equal(a, b):
     return int(a.item()) == int(b.item())
 
 
+def _should_update_beta(actions, i, n):
+    """True if beta at step i should get a gradient.
+
+    Update when the option continues into i+1, or on the last step of a
+    multi-step option (same as i-1, different from i+1). Skip length-1
+    options and the final rollout step (no i+1 to observe).
+    """
+    if i + 1 >= n:
+        return False
+    if _action_equal(actions[i], actions[i + 1]):
+        return True
+    return i > 0 and _action_equal(actions[i], actions[i - 1])
+
+
 def train(rank, args, shared_model, optimizer, env_conf, frames_total):
     ptitle(f"Train Agent: {rank}")
     gpu_id = args.gpu_ids[rank % len(args.gpu_ids)]
@@ -217,15 +231,14 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     - (args.entropy_coef * player.entropies[i])
                 )
 
-                if i + 1 < n_rewards:
-                    if has_beta1 and _action_equal(
-                        player.actions[i], player.actions[i + 1]
-                    ):
-                        beta_loss = beta_loss + player.betas1[i] * delta
-                    if has_beta2 and _action_equal(
-                        player.actions2[i], player.actions2[i + 1]
-                    ):
-                        beta_loss = beta_loss + player.betas2[i] * delta2
+                if has_beta1 and _should_update_beta(
+                    player.actions, i, n_rewards
+                ):
+                    beta_loss = beta_loss + player.betas1[i] * delta
+                if has_beta2 and _should_update_beta(
+                    player.actions2, i, n_rewards
+                ):
+                    beta_loss = beta_loss + player.betas2[i] * delta2
 
                 a2_logits_i = player.a2_logits[i]
 

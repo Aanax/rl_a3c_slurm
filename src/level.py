@@ -131,8 +131,9 @@ class Level(nn.Module):
         if not bootstrap_only:
             self.current_action = action_onehot.detach()
 
-        # beta of the action chosen at this step (omega_t); train masks with
-        # omega_t == omega_{t+1} so only continuing actions get gradient
+        # beta of the action chosen at this step (omega_t); train updates on
+        # continues (omega_t == omega_{t+1}) and on the last step of a
+        # multi-step option (omega_{t-1} == omega_t != omega_{t+1})
         beta_grad = (beta * action_onehot).sum(dim=1, keepdim=True)
 
         return LevelOut(
