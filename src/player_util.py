@@ -4,6 +4,8 @@ os.environ["OMP_NUM_THREADS"] = "1"
 import torch
 import torch.nn.functional as F
 
+from model import HierarchialLevelsOutput
+
 
 class Agent(object):
     def __init__(self, model, env, args, state):
@@ -25,7 +27,10 @@ class Agent(object):
         self.actions2 = []
         self.a2_logits = []
         self.option_terminated = []
+        self.action_terminated = []
         self.betas = []
+        self.betas1 = []
+        self.betas2 = []
         self.states = []
         self.done = True
         self.info = None
@@ -34,23 +39,53 @@ class Agent(object):
         self.hidden_size = args.hidden_size
         self.action_prev = None
 
+    def _reset_persistent_actions(self):
+        if hasattr(self.model, 'reset_persistent_actions'):
+            self.model.reset_persistent_actions()
+        elif hasattr(self.model, 'current_option'):
+            self.model.current_option = None
+
     def action_train(self):
         current_state = self.state.unsqueeze(0)
         model_output = self.model(
             current_state, self.hx, self.cx, None
         )
 
-        (
-            value, logit, self.hx, self.cx, _, _, value2, logit2,
-            action2, beta_active, option_terminated
-        ) = model_output
+        if isinstance(model_output, HierarchialLevelsOutput):
+            value = model_output.V1
+            logit = model_output.a1_logits
+            self.hx = model_output.hx
+            self.cx = model_output.cx
+            value2 = model_output.V2
+            logit2 = model_output.a2_logits
+            action = model_output.a1.data
+            action2 = model_output.a2
+            self.betas1.append(model_output.beta1)
+            self.betas2.append(model_output.beta2)
+            self.betas.append(model_output.beta2)
+            self.action_terminated.append(model_output.terminated1)
+            option_terminated = model_output.terminated2
 
-        prob = F.softmax(logit, dim=1)
-        log_prob = F.log_softmax(logit, dim=1)
-        entropy = -(log_prob * prob).sum(1)
+            log_prob_all = F.log_softmax(logit, dim=1)
+            prob = F.softmax(logit, dim=1)
+            entropy = -(log_prob_all * prob).sum(1)
+            log_prob = log_prob_all.gather(1, action)
+        else:
+            (
+                value, logit, self.hx, self.cx, _, _, value2, logit2,
+                action2, beta_active, option_terminated
+            ) = model_output
+            self.betas.append(beta_active)
+            self.betas2.append(beta_active)
+            self.action_terminated.append(False)
+
+            prob = F.softmax(logit, dim=1)
+            log_prob = F.log_softmax(logit, dim=1)
+            entropy = -(log_prob * prob).sum(1)
+            action = prob.multinomial(1).data
+            log_prob = log_prob.gather(1, action)
+
         self.entropies.append(entropy)
-        action = prob.multinomial(1).data
-        log_prob = log_prob.gather(1, action)
 
         prob2 = F.softmax(logit2, dim=1)
         log_prob2 = F.log_softmax(logit2, dim=1)
@@ -63,7 +98,6 @@ class Agent(object):
         self.actions2.append(action2)
         self.a2_logits.append(logit2)
         self.option_terminated.append(option_terminated)
-        self.betas.append(beta_active)
 
         batch_size = 1
         num_outputs = logit.size(1)
@@ -85,7 +119,7 @@ class Agent(object):
 
         if self.done:
             self.action_prev = None
-            self.model.current_option = None
+            self._reset_persistent_actions()
 
         self.eps_len += 1
         self.reward = max(min(self.reward, 1), -1)
@@ -106,16 +140,22 @@ class Agent(object):
                 else:
                     self.cx = torch.zeros(1, self.hidden_size)
                     self.hx = torch.zeros(1, self.hidden_size)
-                self.model.current_option = None
+                self._reset_persistent_actions()
                 self.action_prev = None
 
             model_output = self.model(
                 self.state.unsqueeze(0), self.hx, self.cx, None
             )
 
-            value, logit, self.hx, self.cx = model_output[:4]
-            prob = F.softmax(logit, dim=1)
-            action = prob.cpu().numpy().argmax()
+            if isinstance(model_output, HierarchialLevelsOutput):
+                logit = model_output.a1_logits
+                self.hx = model_output.hx
+                self.cx = model_output.cx
+                action = model_output.a1.item()
+            else:
+                value, logit, self.hx, self.cx = model_output[:4]
+                prob = F.softmax(logit, dim=1)
+                action = prob.cpu().numpy().argmax()
 
             num_outputs = logit.size(1)
             if self.gpu_id >= 0:
@@ -147,6 +187,9 @@ class Agent(object):
         self.actions2 = []
         self.a2_logits = []
         self.option_terminated = []
+        self.action_terminated = []
         self.betas = []
+        self.betas1 = []
+        self.betas2 = []
         self.states = []
         return self

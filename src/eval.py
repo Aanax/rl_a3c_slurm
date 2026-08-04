@@ -194,17 +194,27 @@ def _model_uses_beta(net, args):
 
 
 def _parse_model_output(model_output):
-    """Parse forward() return tuple for interactor vs concat option models.
+    """Parse forward() return for option models into a uniform dict.
 
-    Hierarchial_interactor_options returns 14 elements:
-        (V1, combined_logits, hx, cx, None, None, V2, a2_logits,
-         a1_logits, a_21_logits, a2_sample, beta_active, V_intr,
-         option_terminated)
-
-    Hierarchial_concat_options returns 11 elements:
-        (V1, a1_logits, hx, cx, None, None, V2, a2_logits,
-         a2_sample, beta_active, option_terminated)
+    Prefers HierarchialLevelsOutput named fields when available.
+    Legacy models fall back to positional layout:
+      concat (11):  [0]=V1 [1]=a1_logits [6]=V2 [7]=a2_logits
+                    [8]=a2 [9]=beta2 [10]=terminated2
+      interactor (14): [10]=a2 [11]=beta [13]=terminated2
     """
+    from model import HierarchialLevelsOutput
+
+    if isinstance(model_output, HierarchialLevelsOutput):
+        return {
+            'V1': model_output.V1,
+            'action_logits': model_output.a1_logits,
+            'V2': model_output.V2,
+            'a2_logits': model_output.a2_logits,
+            'a2_sample': model_output.a2,
+            'beta_active': model_output.beta2,
+            'option_terminated': model_output.terminated2,
+        }
+
     if len(model_output) <= 11:
         a2_sample = model_output[8]
         beta_active = model_output[9]

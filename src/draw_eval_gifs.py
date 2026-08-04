@@ -3,7 +3,7 @@ draw_eval_gifs.py — Download evaluation results from remote server and create 
 
 This script downloads evaluation artifacts from a remote server (via SSH/SFTP),
 then creates two MP4 videos:
-  1. actions.mp4 - Shows logits1, option actually played, and sampled beta
+  1. actions.mp4 - Shows logits1, level2 logits, played option, and sampled beta
   2. VS_short.mp4 - Shows V1, V2 values and rewards over time
 
 Usage:
@@ -391,7 +391,7 @@ def load_eval_data(eval_folder, local_dir):
 
 def create_action_gif(data, eval_folder, local_dir, fps=3, start_idx=0, stop_idx=300, window_size=34):
     """
-    Create actions visualization MP4 showing logits1, played option, and sampled beta.
+    Create actions visualization MP4 showing logits1, level2 logits, and sampled beta.
     """
     print("\n[draw] Creating actions visualization...")
     
@@ -425,13 +425,18 @@ def create_action_gif(data, eval_folder, local_dir, fps=3, start_idx=0, stop_idx
     if actions is not None:
         print(f"[draw] Actions shape: {actions.shape}")
     
-    # Build values dict: logits1, option2 played, beta sampled
+    # Build values dict: logits1, level2 logits, beta sampled
     values_dict = {}
     if Q_int is not None:
-        # Q11s = level 1 logits (action space dim for a1)
         values_dict['logits1 (level1)'] = {
             'value': Q_int,
             'legend': action_legend[:Q_int.shape[1]] if len(Q_int.shape) > 1 else action_legend,
+        }
+    if Q_ext is not None:
+        values_dict['logits2 (level2)'] = {
+            'value': Q_ext,
+            'legend': [f'opt{i}' for i in range(Q_ext.shape[1])],
+            'plot_columns': True,
         }
     if options is not None:
         options_flat = np.squeeze(options)
@@ -444,12 +449,6 @@ def create_action_gif(data, eval_folder, local_dir, fps=3, start_idx=0, stop_idx
             'ylim': (-0.5, max(n_opts - 0.5, 0.5)),
             'plot_style': 'dots',
             'markersize': 7,
-        }
-    elif Q_ext is not None:
-        # Fallback for older evals without oos.npy
-        values_dict['logits2 (level2)'] = {
-            'value': Q_ext,
-            'legend': [str(i) for i in range(Q_ext.shape[1])],
         }
     if beta_samples is not None:
         beta_samples_flat = np.squeeze(beta_samples)

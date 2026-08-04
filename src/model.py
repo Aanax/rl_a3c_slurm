@@ -5,6 +5,33 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+from collections import namedtuple
+
+from level import Level
+
+
+# Named fields for Hierarchial_levels.forward (also indexable as a plain tuple).
+# Legacy slot names hx/cx/mem/x_restored kept for A3C call-site compatibility;
+# they are unused placeholders in this model.
+HierarchialLevelsOutput = namedtuple(
+    'HierarchialLevelsOutput',
+    [
+        'V1',            # 0  level-1 critic value
+        'a1_logits',     # 1  level-1 action logits
+        'hx',            # 2  unused LSTM placeholder
+        'cx',            # 3  unused LSTM placeholder
+        'mem',           # 4  unused
+        'x_restored',    # 5  unused
+        'V2',            # 6  level-2 critic value
+        'a2_logits',     # 7  level-2 option logits
+        'a1',            # 8  sampled/persisted level-1 action index
+        'a2',            # 9  sampled/persisted level-2 option index
+        'beta1',         # 10 level-1 termination coeff (active action)
+        'beta2',         # 11 level-2 termination coeff (active option)
+        'terminated1',   # 12 whether level-1 action terminated this step
+        'terminated2',   # 13 whether level-2 option terminated this step
+    ],
+)
 
 
 class RMSNorm(nn.Module):
@@ -532,5 +559,98 @@ class Hierarchial_interactor_options_zeroing2(Hierarchial_interactor_options):
             V1, combined_logits, hx, cx, None, None, V2, a2_logits,
             a1_logits, a_21_logits, a2_sample, beta_active_grad, V_intr,
             option_terminated,
+        )
+
+
+class Hierarchial_levels(nn.Module):
+    """Two-level hierarchy built from peer Level modules.
+
+    Level 2: s2 -> pi2 / V2 / beta2 (options; sticky via beta2).
+             upper_options_dim=0 (top level, no higher option).
+    Level 1: concat(s1, a2_onehot) -> pi1 / V1 / beta1 (env actions; sticky via beta1).
+             upper_options_dim=num_options (conditioned on active a2).
+
+    Returns HierarchialLevelsOutput (namedtuple; see field docs on that type).
+    """
+
+    def __init__(self, num_inputs, action_space, args):
+        super(Hierarchial_levels, self).__init__()
+        self.hidden_size = args.hidden_size
+        self.monitor_s = getattr(args, 'monitor_s', False)
+        if self.monitor_s:
+            self.s_values = []
+
+        num_outputs = action_space.n
+        self.num_outputs = num_outputs
+        self.num_options = getattr(args, 'num_options', 8)
+
+        use_rmsnorm = getattr(args, 'use_rmsnorm', False)
+        feat1 = 64 * 4 * 4
+        feat2 = 32 * 4 * 4
+
+        self.level2 = Level(
+            encoder=EncoderRules234_2(),
+            feat_dim=feat2,
+            n_actions=self.num_options,
+            upper_options_dim=0,
+        )
+        self.level1 = Level(
+            encoder=EncoderRules234(
+                num_inputs, latent_dim_conv=64, use_rmsnorm=use_rmsnorm
+            ),
+            feat_dim=feat1,
+            n_actions=num_outputs,
+            upper_options_dim=self.num_options,
+        )
+
+        self.train()
+
+    @property
+    def current_option(self):
+        return self.level2.current_action
+
+    @current_option.setter
+    def current_option(self, value):
+        self.level2.current_action = value
+        if value is None:
+            self.level1.current_action = None
+
+    def reset_persistent_actions(self):
+        self.level1.reset_action()
+        self.level2.reset_action()
+
+    def forward(self, inputs, hx, cx, mem=None, bootstrap_only=False):
+        s1 = self.level1.encode(inputs)
+
+        if self.monitor_s and not bootstrap_only:
+            self.s_values.append(s1.detach().cpu())
+
+        hx = torch.Tensor([0])
+        cx = torch.Tensor([0])
+
+        s2 = self.level2.encode(s1)
+        out2 = self.level2.forward_heads(s2, bootstrap_only=bootstrap_only)
+        # a2_onehot is non-differentiable upper-option context for level-1 heads
+        out1 = self.level1.forward_heads(
+            s1,
+            upper_options_onehot=out2.action_onehot.detach(),
+            bootstrap_only=bootstrap_only,
+        )
+
+        return HierarchialLevelsOutput(
+            V1=out1.V,
+            a1_logits=out1.logits,
+            hx=hx,
+            cx=cx,
+            mem=None,
+            x_restored=None,
+            V2=out2.V,
+            a2_logits=out2.logits,
+            a1=out1.action_idx,
+            a2=out2.action_idx,
+            beta1=out1.beta_grad,
+            beta2=out2.beta_grad,
+            terminated1=out1.terminated,
+            terminated2=out2.terminated,
         )
 

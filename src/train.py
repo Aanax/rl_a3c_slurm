@@ -14,20 +14,34 @@ import pickle
 import csv
 
 
+def running_return_td(R, reward, value, gamma):
+    """One step of discounted return and TD advantage (level-agnostic).
+
+    Updates the running return R <- gamma * R + reward, then forms
+    advantage = R - value. Returns (R, advantage, delta) where delta is
+    advantage.detach() for use as an actor/beta weight.
+    """
+    R = gamma * R + reward
+    advantage = R - value
+    return R, advantage, advantage.detach()
+
+
 def compute_level2_loss_v1(args, player, i, R2):
     r2_i = player.values[i].detach() * (1 - args.gamma)
-    R2 = args.gamma2 * R2 + r2_i
-    advantage2 = R2 - player.values2[i]
+    R2, advantage2, delta2 = running_return_td(
+        R2, r2_i, player.values2[i], args.gamma2
+    )
     value_loss2_i = 0.5 * advantage2.pow(2)
-
-    delta2 = advantage2.detach()
-
     return advantage2, value_loss2_i, delta2, R2
 
 
-def sampled_action_target(action, logits): #rename
+def sampled_action_target(action, logits):
     target = torch.zeros_like(logits)
     return target.scatter(1, action, 1.0)
+
+
+def _action_equal(a, b):
+    return int(a.item()) == int(b.item())
 
 
 def train(rank, args, shared_model, optimizer, env_conf, frames_total):
@@ -69,6 +83,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
     loss_csv_path = None
     last_save = 0
     milestone_saved = False
+    use_beta = getattr(args, 'use_beta_termination', True)
     if args.monitor_losses:
         log_dir_path = f"{args.log_dir}{args.experiment_name}/"
         os.makedirs(log_dir_path, exist_ok=True)
@@ -145,17 +160,21 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     bootstrap_only=True
                 )
 
-                value = model_output[0]
-                R = value.detach()
-                value2 = model_output[6]
-                R2 = value2.detach()
+                # HierarchialLevelsOutput has named fields; legacy models use
+                # the same layout for V1 / V2 / a2_logits at indices 0 / 6 / 7.
+                if isinstance(model_output, model.HierarchialLevelsOutput):
+                    R = model_output.V1.detach()
+                    R2 = model_output.V2.detach()
+                    bootstrap_a2_logits = model_output.a2_logits
+                else:
+                    R = model_output[0].detach()
+                    R2 = model_output[6].detach()
+                    bootstrap_a2_logits = model_output[7]
+            else:
+                bootstrap_a2_logits = None
 
             player.values.append(R)
             player.values2.append(R2)
-
-            bootstrap_a2_logits = None
-            if model_output is not None:
-                bootstrap_a2_logits = model_output[7]
 
             policy_loss = 0
             value_loss = 0
@@ -171,23 +190,15 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 init_a2_logits, dim=1
             ).detach()
 
-            # betas[i] terminates the option from step i-1, so it is trained
-            # against l2_delta from step i-1. The loop runs backwards, so
-            # l2_delta[i-1] is only computed on the *next* iteration; defer
-            # applying betas[i] until then via pending_beta.
+            n_rewards = len(player.rewards)
+            has_beta1 = use_beta and len(player.betas1) == n_rewards
+            has_beta2 = use_beta and len(player.betas2) == n_rewards
 
-
-
-
-            
-            pending_beta = None
-
-            for i in reversed(range(len(player.rewards))):
-                R = args.gamma * R + player.rewards[i]
-                advantage = R - player.values[i]
+            for i in reversed(range(n_rewards)):
+                R, advantage, delta = running_return_td(
+                    R, player.rewards[i], player.values[i], args.gamma
+                )
                 value_loss = value_loss + 0.5 * advantage.pow(2)
-
-                delta = advantage.detach()
 
                 (
                     advantage2,
@@ -198,18 +209,23 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
 
                 value_loss2 = value_loss2 + value_loss2_i
 
-                actor1_delta = delta + delta2
-                l2_delta = delta2
+                actor_delta = delta + delta2
 
                 policy_loss = (
                     policy_loss
-                    - (player.log_probs[i] * actor1_delta)
+                    - (player.log_probs[i] * actor_delta)
                     - (args.entropy_coef * player.entropies[i])
                 )
 
-                if pending_beta is not None:
-                    beta_loss = beta_loss + pending_beta * l2_delta
-                pending_beta = player.betas[i]
+                if i + 1 < n_rewards:
+                    if has_beta1 and _action_equal(
+                        player.actions[i], player.actions[i + 1]
+                    ):
+                        beta_loss = beta_loss + player.betas1[i] * delta
+                    if has_beta2 and _action_equal(
+                        player.actions2[i], player.actions2[i + 1]
+                    ):
+                        beta_loss = beta_loss + player.betas2[i] * delta2
 
                 a2_logits_i = player.a2_logits[i]
 
@@ -225,14 +241,13 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 target_prob = level2_running_target
                 pred_log_prob = F.log_softmax(a2_logits_i, dim=1)
                 ce_i = -(target_prob * pred_log_prob).sum(dim=1)
-                policy_loss2 = policy_loss2 + ce_i * l2_delta
+                policy_loss2 = policy_loss2 + ce_i * actor_delta
                 if args.entropy_coef2 > 0:
                     policy_loss2 = (
                         policy_loss2
                         - (args.entropy_coef2 * player.entropies2[i])
                     )
 
-            ### total loss value
             value_loss = value_loss + value_loss2
             beta_term = args.beta_coef * beta_loss
             total_loss = (
