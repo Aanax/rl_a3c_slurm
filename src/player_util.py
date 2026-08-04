@@ -25,6 +25,7 @@ class Agent(object):
         self.entropies2 = []
         self.actions = []
         self.actions2 = []
+        self.a1_logits = []
         self.a2_logits = []
         self.option_terminated = []
         self.action_terminated = []
@@ -126,6 +127,7 @@ class Agent(object):
         self.values.append(value)
         self.log_probs.append(log_prob)
         self.actions.append(action)
+        self.a1_logits.append(logit)
         self.rewards.append(self.reward)
         self.states.append(current_state)
         return self
@@ -185,6 +187,7 @@ class Agent(object):
         self.entropies2 = []
         self.actions = []
         self.actions2 = []
+        self.a1_logits = []
         self.a2_logits = []
         self.option_terminated = []
         self.action_terminated = []

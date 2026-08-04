@@ -175,16 +175,20 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 )
 
                 # HierarchialLevelsOutput has named fields; legacy models use
-                # the same layout for V1 / V2 / a2_logits at indices 0 / 6 / 7.
+                # the same layout for V1 / a1_logits / V2 / a2_logits at
+                # indices 0 / 1 / 6 / 7.
                 if isinstance(model_output, model.HierarchialLevelsOutput):
                     R = model_output.V1.detach()
                     R2 = model_output.V2.detach()
+                    bootstrap_a1_logits = model_output.a1_logits
                     bootstrap_a2_logits = model_output.a2_logits
                 else:
                     R = model_output[0].detach()
                     R2 = model_output[6].detach()
+                    bootstrap_a1_logits = model_output[1]
                     bootstrap_a2_logits = model_output[7]
             else:
+                bootstrap_a1_logits = None
                 bootstrap_a2_logits = None
 
             player.values.append(R)
@@ -196,6 +200,13 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             value_loss2 = 0
             beta_loss = 0
             last_idx = len(player.rewards) - 1
+            if bootstrap_a1_logits is not None:
+                init_a1_logits = bootstrap_a1_logits
+            else:
+                init_a1_logits = player.a1_logits[last_idx]
+            level1_running_target = F.softmax(
+                init_a1_logits, dim=1
+            ).detach()
             if bootstrap_a2_logits is not None:
                 init_a2_logits = bootstrap_a2_logits
             else:
@@ -225,12 +236,6 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
 
                 actor_delta = delta + delta2
 
-                policy_loss = (
-                    policy_loss
-                    - (player.log_probs[i] * actor_delta)
-                    - (args.entropy_coef * player.entropies[i])
-                )
-
                 if has_beta1 and _should_update_beta(
                     player.actions, i, n_rewards
                 ):
@@ -239,6 +244,24 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     player.actions2, i, n_rewards
                 ):
                     beta_loss = beta_loss + player.betas2[i] * delta2
+
+                a1_logits_i = player.a1_logits[i]
+                sampled_target1 = sampled_action_target(
+                    player.actions[i],
+                    a1_logits_i,
+                )
+                level1_running_target = (
+                    args.gamma * level1_running_target
+                    + (1 - args.gamma) * sampled_target1
+                ).detach()
+                pred_log_prob1 = F.log_softmax(a1_logits_i, dim=1)
+                ce1_i = -(level1_running_target * pred_log_prob1).sum(dim=1)
+                policy_loss = policy_loss + ce1_i * actor_delta
+                if args.entropy_coef > 0:
+                    policy_loss = (
+                        policy_loss
+                        - (args.entropy_coef * player.entropies[i])
+                    )
 
                 a2_logits_i = player.a2_logits[i]
 
