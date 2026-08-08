@@ -84,7 +84,13 @@ class Level(nn.Module):
             return torch.cat([flat, upper_options_onehot], dim=1)
         return flat
 
-    def forward_heads(self, features, upper_options_onehot=None, bootstrap_only=False):
+    def forward_heads(
+        self,
+        features,
+        upper_options_onehot=None,
+        bootstrap_only=False,
+        force_terminate=False,
+    ):
         """Run actor/critic/beta and sticky action sampling for this level.
 
         Args:
@@ -93,6 +99,8 @@ class Level(nn.Module):
                 option (length upper_options_dim). Ignored when
                 upper_options_dim == 0.
             bootstrap_only: if True, do not update current_action / monitoring.
+            force_terminate: if True, skip beta sampling and resample from the
+                policy (used when a higher level terminates).
         """
         head_in = self._head_input(features, upper_options_onehot)
         logits = self.actor(head_in)
@@ -109,9 +117,15 @@ class Level(nn.Module):
         if bootstrap_only and prev_action is not None and prev_action.size(0) == probs.size(0):
             action_idx = prev_action.argmax(dim=1, keepdim=True)
             terminated = False
-        elif prev_action is None or prev_action.size(0) != probs.size(0):
+        elif (
+            force_terminate
+            or prev_action is None
+            or prev_action.size(0) != probs.size(0)
+        ):
+            # Fresh choice (episode start / higher-level terminate): treat as
+            # terminated so training updates the policy, not beta.
             action_idx = probs.multinomial(1)
-            terminated = False
+            terminated = True
         else:
             beta_active = (beta.detach() * prev_action).sum(dim=1, keepdim=True)
             beta_active = beta_active.clamp(0.0, 1.0)
@@ -131,9 +145,8 @@ class Level(nn.Module):
         if not bootstrap_only:
             self.current_action = action_onehot.detach()
 
-        # beta of the action chosen at this step (omega_t); train updates on
-        # continues (omega_t == omega_{t+1}) and on the last step of a
-        # multi-step option (omega_{t-1} == omega_t != omega_{t+1})
+        # beta of the action chosen at this step; train updates beta when the
+        # sampled terminate flag is 0, and the policy when it is 1.
         beta_grad = (beta * action_onehot).sum(dim=1, keepdim=True)
 
         return LevelOut(

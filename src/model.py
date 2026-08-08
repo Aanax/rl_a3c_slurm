@@ -570,6 +570,10 @@ class Hierarchial_levels(nn.Module):
     Level 1: concat(s1, a2_onehot) -> pi1 / V1 / beta1 (env actions; sticky via beta1).
              upper_options_dim=num_options (conditioned on active a2).
 
+    Termination subordination: if beta2 terminates, beta1 is forced to
+    terminate (resample L1 action without sampling beta1). beta1 is sampled
+    only while the level-2 option continues.
+
     Returns HierarchialLevelsOutput (namedtuple; see field docs on that type).
     """
 
@@ -630,11 +634,15 @@ class Hierarchial_levels(nn.Module):
 
         s2 = self.level2.encode(s1)
         out2 = self.level2.forward_heads(s2, bootstrap_only=bootstrap_only)
+        # Subordination: beta2=1 => force beta1=1 (resample L1, do not sample beta1).
+        # Only when beta2=0 (continue L2 option) do we sample beta1.
+        force_l1_terminate = (not bootstrap_only) and bool(out2.terminated)
         # a2_onehot is non-differentiable upper-option context for level-1 heads
         out1 = self.level1.forward_heads(
             s1,
             upper_options_onehot=out2.action_onehot.detach(),
             bootstrap_only=bootstrap_only,
+            force_terminate=force_l1_terminate,
         )
 
         return HierarchialLevelsOutput(
