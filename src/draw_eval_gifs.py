@@ -3,15 +3,15 @@ draw_eval_gifs.py — Download evaluation results from remote server and create 
 
 This script downloads evaluation artifacts from a remote server (via SSH/SFTP),
 then creates two MP4 videos:
-  1. actions.mp4 - Shows logits1, level2 logits, played option, and sampled beta
+  1. actions.mp4 - Configurable panels (max 4) overlaid on frames
   2. VS_short.mp4 - Shows V1, V2 values and rewards over time
 
 Usage:
     python src/draw_eval_gifs.py EVAL_FOLDER_NAME [options]
-    
+
 Arguments:
     EVAL_FOLDER_NAME - Name of the eval folder on remote server (e.g., Eval_2024-12-04_21:58:10_cosineFix2_try2.468102)
-    
+
 Options:
     --local-dir LOCAL_DIR     Local directory to download files (default: same as eval folder name)
     --server SERVER           Server SSH name/address (default: ui4.computing.kiae.ru)
@@ -22,9 +22,16 @@ Options:
     --start-idx START         Start frame index (default: 0)
     --stop-idx STOP           Stop frame index (default: 300, -1 for all)
     --window-size SIZE        Window size for value plots (default: 34)
+    --panels P1 [P2 P3 P4]    Up to 4 params to draw on actions.mp4
+                              Default: beta1 beta2 option2 action
+
+Available --panels names:
+    beta1, beta2, option2, action, logits1, logits2,
+    beta_samples, betas, beta_active, terminated1, terminated2
 
 Example:
-    python src/draw_eval_gifs.py Eval_2026-03-29_00:21:09_PongNoFrameskip-v4 --remote-path /home/users/aamore/rl_a3c_pytorch/logs/eval/
+    python src/draw_eval_gifs.py Eval_2026-03-29_00:21:09_PongNoFrameskip-v4 --no-download
+    python src/draw_eval_gifs.py Eval_xxx --panels beta1 beta2 option2 action --no-download
 """
 
 import torch
@@ -51,6 +58,40 @@ try:
 except ImportError:
     HAS_PARAMIKO = False
     paramiko = None
+
+
+DEFAULT_ACTION_PANELS = ['beta1', 'beta2', 'option2', 'action']
+MAX_ACTION_PANELS = 4
+
+# Aliases -> canonical panel keys
+PANEL_ALIASES = {
+    'beta1': 'beta1',
+    'beta2': 'beta2',
+    'option': 'option2',
+    'option2': 'option2',
+    'option2_played': 'option2',
+    'action': 'action',
+    'action_chosen': 'action',
+    'logits1': 'logits1',
+    'logits2': 'logits2',
+    'q11': 'logits1',
+    'q22': 'logits2',
+    'beta_samples': 'beta_samples',
+    'betas': 'betas',
+    'beta_active': 'beta_active',
+    'terminated1': 'terminated1',
+    'terminated2': 'terminated2',
+}
+
+
+def _as_col(arr):
+    """Squeeze and reshape to (N, 1) for single-series panels."""
+    flat = np.squeeze(arr)
+    if flat.ndim == 0:
+        flat = flat.reshape(1)
+    if flat.ndim == 1:
+        return flat.reshape(-1, 1)
+    return flat
 
 
 def _panel_ylim(panel_cfg, val_data):
@@ -294,6 +335,7 @@ def download_eval_files(eval_folder, local_dir, server, username, remote_project
     needed_suffixes = [
         'Q11s.npy', 'Q22s.npy', 'Q21s.npy', 'aas.npy', 'oos.npy',
         'betas.npy', 'beta_logits.npy', 'beta_active.npy', 'beta_samples.npy',
+        'beta1s.npy', 'beta2s.npy', 'terminated1s.npy', 'terminated2s.npy',
         'Frames_normalized_orig.npy', 'Vs.npy', 'Vs2.npy',
         'rewards.npy', 'gs2.npy', 'gs1.npy', 'ss.npy', 'ss2.npy'
     ]
@@ -357,25 +399,30 @@ def load_eval_data(eval_folder, local_dir):
     all_files = os.listdir(local_dir)
     
     # Mapping from file suffixes to data keys
-    suffix_to_key = {
-        'Q11s.npy': 'Q_int',      # Level 1 logits (intrinsic/mixed)
-        'Q22s.npy': 'Q_ext',      # Level 2 logits (extrinsic)
-        'aas.npy': 'action',      # Selected actions
-        'oos.npy': 'option',      # NEW: option indices actually played
-        'betas.npy': 'betas',     # Per-option termination betas
-        'beta_logits.npy': 'beta_logits',  # Pre-sigmoid beta logits
-        'beta_active.npy': 'beta_active',  # Active termination beta
-        'beta_samples.npy': 'beta_samples',  # NEW: Bernoulli terminate samples
-        'Vs.npy': 'Vs',           # Level 1 values
-        'Vs2.npy': 'Vs2',         # Level 2 values
-        'rewards.npy': 'rewards', # Rewards
-        'Frames_normalized_orig.npy': 'frames',  # Normalized frames
-        'ss.npy': 'ss',           # Level 1 features
-        'ss2.npy': 'ss2',         # Level 2 features
-    }
+    # Longer / more-specific suffixes first so e.g. beta_active matches before beta.
+    suffix_to_key = [
+        ('Frames_normalized_orig.npy', 'frames'),
+        ('beta_logits.npy', 'beta_logits'),
+        ('beta_active.npy', 'beta_active'),
+        ('beta_samples.npy', 'beta_samples'),
+        ('terminated1s.npy', 'terminated1'),
+        ('terminated2s.npy', 'terminated2'),
+        ('beta1s.npy', 'beta1'),
+        ('beta2s.npy', 'beta2'),
+        ('betas.npy', 'betas'),
+        ('Q11s.npy', 'Q_int'),
+        ('Q22s.npy', 'Q_ext'),
+        ('aas.npy', 'action'),
+        ('oos.npy', 'option'),
+        ('Vs2.npy', 'Vs2'),
+        ('Vs.npy', 'Vs'),
+        ('rewards.npy', 'rewards'),
+        ('ss2.npy', 'ss2'),
+        ('ss.npy', 'ss'),
+    ]
     
     for filename in all_files:
-        for suffix, key in suffix_to_key.items():
+        for suffix, key in suffix_to_key:
             if filename.endswith(suffix):
                 filepath = os.path.join(local_dir, filename)
                 try:
@@ -389,115 +436,231 @@ def load_eval_data(eval_folder, local_dir):
     return data
 
 
-def create_action_gif(data, eval_folder, local_dir, fps=3, start_idx=0, stop_idx=300, window_size=34):
-    """
-    Create actions visualization MP4 showing logits1, level2 logits, and sampled beta.
-    """
-    print("\n[draw] Creating actions visualization...")
-    
-    frames = data['frames']
-    
-    # Get action legend from environment (Pong has 6 actions)
+def normalize_panel_names(panel_names):
+    """Validate/normalize panel names; at most MAX_ACTION_PANELS."""
+    if not panel_names:
+        panel_names = list(DEFAULT_ACTION_PANELS)
+    if len(panel_names) > MAX_ACTION_PANELS:
+        raise ValueError(
+            f"At most {MAX_ACTION_PANELS} panels allowed, got {len(panel_names)}: {panel_names}"
+        )
+    normalized = []
+    unknown = []
+    for name in panel_names:
+        key = PANEL_ALIASES.get(name.lower().strip())
+        if key is None:
+            unknown.append(name)
+        else:
+            normalized.append(key)
+    if unknown:
+        available = ', '.join(sorted(set(PANEL_ALIASES.keys())))
+        raise ValueError(
+            f"Unknown panel name(s): {unknown}. Available: {available}"
+        )
+    return normalized
+
+
+def build_available_panels(data):
+    """Build a dict of panel_key -> panel_cfg from loaded eval arrays."""
     action_legend = ["noop", "fire", "right", "left", "rightfire", "leftfire"]
-    
-    # Prepare Q-values - handle different action spaces
-    Q_int = data.get('Q_int', None)
-    Q_ext = data.get('Q_ext', None)
-    actions = data.get('action', None)
-    options = data.get('option', None)
-    betas = data.get('betas', None)
-    beta_active = data.get('beta_active', None)
-    beta_samples = data.get('beta_samples', None)
-    
+    panels = {}
+
+    Q_int = data.get('Q_int')
+    Q_ext = data.get('Q_ext')
+    actions = data.get('action')
+    options = data.get('option')
+    betas = data.get('betas')
+    beta_active = data.get('beta_active')
+    beta_samples = data.get('beta_samples')
+    beta1 = data.get('beta1')
+    beta2 = data.get('beta2')
+    terminated1 = data.get('terminated1')
+    terminated2 = data.get('terminated2')
+
     if Q_int is not None:
-        print(f"[draw] Q_int shape: {Q_int.shape}, range: [{np.min(Q_int):.2f}, {np.max(Q_int):.2f}]")
-    if Q_ext is not None:
-        print(f"[draw] Q_ext shape: {Q_ext.shape}, range: [{np.min(Q_ext):.2f}, {np.max(Q_ext):.2f}]")
-    if options is not None:
-        print(f"[draw] Options shape: {options.shape}, range: [{np.min(options)}, {np.max(options)}]")
-    if beta_samples is not None:
-        print(f"[draw] Beta_samples shape: {beta_samples.shape}, "
-              f"mean terminate={np.mean(beta_samples):.3f}")
-    if betas is not None:
-        print(f"[draw] Betas shape: {betas.shape}, range: [{np.min(betas):.2f}, {np.max(betas):.2f}]")
-    if beta_active is not None:
-        print(f"[draw] Beta_active shape: {beta_active.shape}, range: [{np.min(beta_active):.2f}, {np.max(beta_active):.2f}]")
-    if actions is not None:
-        print(f"[draw] Actions shape: {actions.shape}")
-    
-    # Build values dict: logits1, level2 logits, beta sampled
-    values_dict = {}
-    if Q_int is not None:
-        values_dict['logits1 (level1)'] = {
+        panels['logits1'] = {
             'value': Q_int,
             'legend': action_legend[:Q_int.shape[1]] if len(Q_int.shape) > 1 else action_legend,
+            'title': 'logits1 (level1)',
         }
     if Q_ext is not None:
-        values_dict['logits2 (level2)'] = {
+        panels['logits2'] = {
             'value': Q_ext,
             'legend': [f'opt{i}' for i in range(Q_ext.shape[1])],
             'plot_columns': True,
+            'title': 'logits2 (level2)',
         }
     if options is not None:
-        options_flat = np.squeeze(options)
-        if options_flat.ndim == 1:
-            options_flat = options_flat.reshape(-1, 1)
+        options_flat = _as_col(options)
         n_opts = int(np.max(options_flat)) + 1 if options_flat.size else 1
-        values_dict['option2 (played)'] = {
+        panels['option2'] = {
             'value': options_flat,
             'legend': ['option'],
             'ylim': (-0.5, max(n_opts - 0.5, 0.5)),
             'plot_style': 'dots',
             'markersize': 7,
+            'title': 'option2 (played)',
+        }
+    if actions is not None:
+        actions_flat = _as_col(actions)
+        n_acts = int(np.max(actions_flat)) + 1 if actions_flat.size else 1
+        panels['action'] = {
+            'value': actions_flat,
+            'legend': ['action'],
+            'ylim': (-0.5, max(n_acts - 0.5, 0.5)),
+            'plot_style': 'dots',
+            'markersize': 7,
+            'title': 'action (chosen)',
+        }
+    if beta1 is not None:
+        panels['beta1'] = {
+            'value': _as_col(beta1),
+            'legend': ['beta1'],
+            'ylim': (0.0, 1.0),
+            'plot_style': 'dots',
+            'markersize': 6,
+            'title': 'beta1',
+        }
+    if beta2 is not None:
+        panels['beta2'] = {
+            'value': _as_col(beta2),
+            'legend': ['beta2'],
+            'ylim': (0.0, 1.0),
+            'plot_style': 'dots',
+            'markersize': 6,
+            'title': 'beta2',
+        }
+    elif beta_active is not None:
+        # Older evals: only beta_active (== beta2 of current option)
+        panels['beta2'] = {
+            'value': _as_col(beta_active),
+            'legend': ['beta2'],
+            'ylim': (0.0, 1.0),
+            'plot_style': 'dots',
+            'markersize': 6,
+            'title': 'beta2 (beta_active)',
+        }
+    if terminated1 is not None:
+        panels['terminated1'] = {
+            'value': _as_col(terminated1),
+            'legend': ['terminated1'],
+            'ylim': (-0.1, 1.1),
+            'plot_style': 'dots',
+            'markersize': 7,
+            'title': 'terminated1',
+        }
+    if terminated2 is not None:
+        panels['terminated2'] = {
+            'value': _as_col(terminated2),
+            'legend': ['terminated2'],
+            'ylim': (-0.1, 1.1),
+            'plot_style': 'dots',
+            'markersize': 7,
+            'title': 'terminated2',
         }
     if beta_samples is not None:
-        beta_samples_flat = np.squeeze(beta_samples)
-        if beta_samples_flat.ndim == 1:
-            beta_samples_flat = beta_samples_flat.reshape(-1, 1)
-        values_dict['beta (sampled terminate)'] = {
-            'value': beta_samples_flat,
+        panels['beta_samples'] = {
+            'value': _as_col(beta_samples),
             'legend': ['terminate'],
             'ylim': (-0.1, 1.1),
             'plot_style': 'dots',
             'markersize': 7,
+            'title': 'beta (sampled terminate)',
         }
-    elif betas is not None:
-        # Fallback for older evals without beta_samples.npy
+        # Alias for older naming when terminated2 file is absent
+        if 'terminated2' not in panels:
+            panels['terminated2'] = dict(panels['beta_samples'])
+            panels['terminated2']['title'] = 'terminated2 (beta_samples)'
+    if betas is not None:
         beta_panel = {
             'value': betas,
-            'legend': [f'opt{i}' for i in range(betas.shape[1])],
+            'legend': [f'opt{i}' for i in range(betas.shape[1])] if betas.ndim > 1 else ['beta'],
             'ylim': (0.0, 1.0),
-            'plot_columns': True,
+            'plot_columns': betas.ndim > 1 and betas.shape[1] > 1,
             'plot_style': 'dots',
             'markersize': 5,
+            'title': 'beta probabilities P(terminate | opt_i)',
         }
         if beta_active is not None:
-            beta_active_flat = np.squeeze(beta_active)
-            if beta_active_flat.ndim == 1:
-                beta_panel['overlay'] = {
-                    'value': beta_active_flat,
-                    'legend': ['beta_active (current option)'],
-                    'color': 'black',
-                    'plot_style': 'dots',
-                    'markersize': 8,
-                }
-        values_dict['beta probabilities P(terminate | opt_i)'] = beta_panel
-    elif beta_active is not None:
-        beta_active_flat = np.squeeze(beta_active)
-        if beta_active_flat.ndim == 1:
-            beta_active_flat = beta_active_flat.reshape(-1, 1)
-        values_dict['beta_active P(terminate)'] = {
-            'value': beta_active_flat,
+            beta_panel['overlay'] = {
+                'value': _as_col(beta_active).reshape(-1),
+                'legend': ['beta_active (current option)'],
+                'color': 'black',
+                'plot_style': 'dots',
+                'markersize': 8,
+            }
+        panels['betas'] = beta_panel
+    if beta_active is not None:
+        panels['beta_active'] = {
+            'value': _as_col(beta_active),
             'legend': ['beta_active'],
             'ylim': (0.0, 1.0),
             'plot_style': 'dots',
             'markersize': 6,
+            'title': 'beta_active P(terminate)',
         }
-    elif actions is not None:
-        # Squeeze actions if needed
-        if len(actions.shape) > 1:
-            actions = np.squeeze(actions, axis=1)
-        values_dict['action'] = {'value': actions.reshape(-1, 1), 'legend': action_legend}
+
+    return panels
+
+
+def select_panels(available_panels, panel_names):
+    """Pick requested panels in order; skip missing with a warning."""
+    values_dict = {}
+    for name in panel_names:
+        if name not in available_panels:
+            print(f"[draw] Warning: panel '{name}' not available in loaded data, skipping")
+            continue
+        cfg = dict(available_panels[name])
+        title = cfg.pop('title', name)
+        values_dict[title] = cfg
+    return values_dict
+
+
+def create_action_gif(
+    data,
+    eval_folder,
+    local_dir,
+    fps=3,
+    start_idx=0,
+    stop_idx=300,
+    window_size=34,
+    panels=None,
+):
+    """
+    Create actions visualization MP4 with up to 4 selected panels.
+    """
+    print("\n[draw] Creating actions visualization...")
+    
+    frames = data['frames']
+    panel_names = normalize_panel_names(panels)
+    print(f"[draw] Requested panels: {panel_names}")
+
+    available = build_available_panels(data)
+    print(f"[draw] Available panels: {sorted(available.keys())}")
+
+    for key, arr in [
+        ('Q_int', data.get('Q_int')),
+        ('Q_ext', data.get('Q_ext')),
+        ('option', data.get('option')),
+        ('action', data.get('action')),
+        ('beta1', data.get('beta1')),
+        ('beta2', data.get('beta2')),
+        ('beta_samples', data.get('beta_samples')),
+        ('betas', data.get('betas')),
+        ('beta_active', data.get('beta_active')),
+        ('terminated1', data.get('terminated1')),
+        ('terminated2', data.get('terminated2')),
+    ]:
+        if arr is not None:
+            print(f"[draw] {key} shape: {arr.shape}")
+
+    values_dict = select_panels(available, panel_names)
+    if not values_dict:
+        raise RuntimeError(
+            f"None of the requested panels are available: {panel_names}. "
+            f"Available: {sorted(available.keys())}"
+        )
+    print(f"[draw] Drawing panels: {list(values_dict.keys())}")
     
     # Create frames
     dd = draw_frames_with_info(
@@ -593,6 +756,10 @@ def main():
         epilog="""
 Example:
     python src/draw_eval_gifs.py Eval_2024-12-04_21:58:10_cosineFix2_try2.468102
+    python src/draw_eval_gifs.py Eval_xxx --panels beta1 beta2 option2 action --no-download
+
+Available --panels: beta1, beta2, option2, action, logits1, logits2,
+                    beta_samples, betas, beta_active, terminated1, terminated2
         """
     )
     parser.add_argument('eval_folder', help='Name of the eval folder on remote server')
@@ -616,15 +783,32 @@ Example:
                        help='Stop frame index (default: 300, -1 for all)')
     parser.add_argument('--window-size', type=int, default=34,
                        help='Window size for value plots (default: 34)')
+    parser.add_argument(
+        '--panels',
+        nargs='+',
+        default=None,
+        metavar='PARAM',
+        help=(
+            f'Up to {MAX_ACTION_PANELS} params to draw on actions.mp4 '
+            f'(default: {" ".join(DEFAULT_ACTION_PANELS)})'
+        ),
+    )
     
     args = parser.parse_args()
     
     # Determine local directory
     local_dir = args.local_dir if args.local_dir else args.eval_folder
     
+    try:
+        panel_names = normalize_panel_names(args.panels)
+    except ValueError as e:
+        print(f"[main] ERROR: {e}")
+        return
+    
     print(f"="*60)
     print(f"Evaluation Folder: {args.eval_folder}")
     print(f"Local Directory: {local_dir}")
+    print(f"Action panels: {panel_names}")
     print(f"="*60)
     
     # Download files if requested
@@ -661,9 +845,12 @@ Example:
     
     # Create GIFs
     try:
-        create_action_gif(data, args.eval_folder, local_dir, 
-                         fps=args.fps, start_idx=args.start_idx, 
-                         stop_idx=args.stop_idx, window_size=args.window_size)
+        create_action_gif(
+            data, args.eval_folder, local_dir,
+            fps=args.fps, start_idx=args.start_idx,
+            stop_idx=args.stop_idx, window_size=args.window_size,
+            panels=panel_names,
+        )
     except Exception as e:
         print(f"[main] Error creating action GIF: {e}")
         import traceback

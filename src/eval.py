@@ -21,13 +21,14 @@ Usage (cluster - outputs to logs/ folder):
 Output format (saved as .npy files):
     Frames_normalized_orig.npy - Preprocessed frames (N, C, H, W)
     Q11s.npy - Level 1 logits (N, num_actions)
-    Q22s.npy - Level 2 logits (N, num_options) 
-    aas.npy - Selected actions (N, 1)
-    betas.npy - Per-option termination betas (N, num_options), if use_beta_termination
-    beta_logits.npy - Pre-sigmoid beta logits (N, num_options), if use_beta_termination
-    beta_active.npy - Active termination beta for current option (N, 1), if use_beta_termination
-    oos.npy - Option indices actually played (N, 1)  [NEW]
-    beta_samples.npy - Bernoulli terminate samples 0/1 (N, 1), if use_beta_termination  [NEW]
+    Q22s.npy - Level 2 logits (N, num_options)
+    aas.npy - Selected actions (N, 1)  [sticky a1 for Hierarchial_levels]
+    oos.npy - Option indices actually played (N, 1)
+    beta1s.npy - Level-1 termination coeff for chosen action (N, 1)
+    beta2s.npy - Level-2 termination coeff for chosen option (N, 1)
+    terminated1s.npy - Level-1 terminate samples 0/1 (N, 1)
+    terminated2s.npy - Level-2 terminate samples 0/1 (N, 1)
+    betas.npy / beta_logits.npy / beta_active.npy / beta_samples.npy - legacy beta dumps
     rewards.npy - Rewards (N,)
     Vs.npy - Level 1 values (N, 1)
     Vs2.npy - Level 2 values (N, 1)
@@ -179,18 +180,36 @@ def load_model_and_env(args):
 
 
 def _reset_model_memory(net):
-    """Reset option state between episodes."""
-    if hasattr(net, 'current_option'):
+    """Reset sticky action / option state between episodes."""
+    if hasattr(net, 'reset_persistent_actions'):
+        net.reset_persistent_actions()
+    elif hasattr(net, 'current_option'):
         net.current_option = None
     if hasattr(net, 'beta_values'):
         net.beta_values = []
     if hasattr(net, 'beta_logits_values'):
         net.beta_logits_values = []
-    net.last_beta_logits = None
+    if hasattr(net, 'last_beta_logits'):
+        net.last_beta_logits = None
 
 
-def _model_uses_beta(net, args):
+def _model_uses_legacy_beta(net, args):
+    """Old models that dump per-option beta vectors via monitor_beta."""
     return args.use_beta_termination and hasattr(net, 'beta_linear')
+
+
+def _to_scalar_float(x):
+    if torch.is_tensor(x):
+        return float(x.detach().cpu().reshape(-1)[0].item())
+    return float(x)
+
+
+def _to_numpy_1d(x):
+    if torch.is_tensor(x):
+        arr = x.detach().cpu().numpy()
+    else:
+        arr = np.asarray(x)
+    return np.asarray(arr).reshape(-1)
 
 
 def _parse_model_output(model_output):
@@ -210,9 +229,13 @@ def _parse_model_output(model_output):
             'action_logits': model_output.a1_logits,
             'V2': model_output.V2,
             'a2_logits': model_output.a2_logits,
+            'a1_sample': model_output.a1,
             'a2_sample': model_output.a2,
-            'beta_active': model_output.beta2,
-            'option_terminated': model_output.terminated2,
+            'beta1': model_output.beta1,
+            'beta2': model_output.beta2,
+            'terminated1': model_output.terminated1,
+            'terminated2': model_output.terminated2,
+            'has_levels_betas': True,
         }
 
     if len(model_output) <= 11:
@@ -229,9 +252,13 @@ def _parse_model_output(model_output):
         'action_logits': model_output[1],
         'V2': model_output[6],
         'a2_logits': model_output[7],
+        'a1_sample': None,
         'a2_sample': a2_sample,
-        'beta_active': beta_active,
-        'option_terminated': option_terminated,
+        'beta1': None,
+        'beta2': beta_active,
+        'terminated1': None,
+        'terminated2': option_terminated,
+        'has_levels_betas': False,
     }
 
 
@@ -242,11 +269,11 @@ def run_evaluation(net, env, args):
     Returns dictionaries with collected data for each episode.
     """
     gpu_id = args.gpu_id
-    log_beta = _model_uses_beta(net, args)
-    if log_beta:
+    log_legacy_beta = _model_uses_legacy_beta(net, args)
+    if log_legacy_beta:
         net.monitor_beta = True
         net.beta_values = []
-        print("[eval] Beta logging enabled")
+        print("[eval] Legacy beta logging enabled")
     
     all_episodes_data = []
     
@@ -264,11 +291,15 @@ def run_evaluation(net, env, args):
         Q11s = []  # Level 1 logits
         Q22s = []  # Level 2 logits
         aas = []  # Actions taken
-        betas = []  # Per-option termination betas
-        beta_logits = []  # Pre-sigmoid beta logits
-        beta_active = []  # Active termination beta for current option
-        oos = []  # NEW: options actually played
-        beta_samples = []  # NEW: Bernoulli terminate samples (0/1)
+        betas = []  # Per-option termination betas (legacy)
+        beta_logits = []  # Pre-sigmoid beta logits (legacy)
+        beta_active = []  # Active termination beta for current option (legacy)
+        oos = []  # Options actually played
+        beta_samples = []  # Bernoulli terminate samples (legacy alias of terminated2)
+        beta1s = []  # Level-1 termination coeff for chosen action
+        beta2s = []  # Level-2 termination coeff for chosen option
+        terminated1s = []  # Level-1 terminate samples
+        terminated2s = []  # Level-2 terminate samples
         rewards = []  # Rewards received
         Vs = []  # Level 1 values
         Vs2 = []  # Level 2 values
@@ -293,31 +324,45 @@ def run_evaluation(net, env, args):
             a1_logits = parsed['action_logits']
             V2 = parsed['V2']
             a2_logits = parsed['a2_logits']
+            a1_sample = parsed['a1_sample']
             a2_sample = parsed['a2_sample']
-            beta_active_step = parsed['beta_active']
-            option_terminated = parsed['option_terminated']
+            beta1_step = parsed['beta1']
+            beta2_step = parsed['beta2']
+            terminated1 = parsed['terminated1']
+            terminated2 = parsed['terminated2']
             
-            # Get action probabilities and select action (greedy)
-            prob = F.softmax(a1_logits, dim=1)
-            action = prob.cpu().numpy().argmax(axis=1)[0]
+            # Prefer sticky a1 from Hierarchial_levels; otherwise greedy argmax
+            if a1_sample is not None:
+                action = int(_to_numpy_1d(a1_sample)[0])
+            else:
+                prob = F.softmax(a1_logits, dim=1)
+                action = int(prob.cpu().numpy().argmax(axis=1)[0])
             
             # Store data
             frames_normalized_orig.append(obs.copy())
             ss.append(net.s_values[-1].cpu().numpy() if hasattr(net, 's_values') and net.s_values 
                       else torch.zeros(1, 64, 4, 4).numpy())  # Level 1 features
             Q11s.append(a1_logits.cpu().numpy()[0])  # Level 1 logits
-            Q22s.append(a2_logits.cpu().numpy()[0])  # Level 2 logits (16-dim)
+            Q22s.append(a2_logits.cpu().numpy()[0])  # Level 2 logits
             aas.append([action])  # Action taken
-            oos.append(a2_sample.cpu().numpy()[0])  # NEW: option actually played
-            if log_beta:
+            oos.append([int(_to_numpy_1d(a2_sample)[0])])  # Option actually played
+
+            if beta1_step is not None:
+                beta1s.append([_to_scalar_float(beta1_step)])
+            if beta2_step is not None:
+                beta2s.append([_to_scalar_float(beta2_step)])
+            if terminated1 is not None:
+                terminated1s.append([_to_scalar_float(terminated1)])
+            if terminated2 is not None:
+                terminated2s.append([_to_scalar_float(terminated2)])
+
+            if log_legacy_beta:
                 betas.append(net.beta_values[-1].numpy()[0])
                 beta_logits.append(net.last_beta_logits.cpu().numpy()[0])
-                beta_active.append(beta_active_step.cpu().numpy()[0])
-                if torch.is_tensor(option_terminated):
-                    beta_sample = float(option_terminated.item())
-                else:
-                    beta_sample = 1.0 if option_terminated else 0.0
-                beta_samples.append([beta_sample])  # NEW: sampled terminate
+                if beta2_step is not None:
+                    beta_active.append(_to_numpy_1d(beta2_step))
+                beta_samples.append([_to_scalar_float(terminated2)])
+
             Vs.append(V1.cpu().numpy()[0])  # Level 1 value
             Vs2.append(V2.cpu().numpy()[0])  # Level 2 value
             
@@ -336,9 +381,9 @@ def run_evaluation(net, env, args):
             # Clear cached forward-pass values after storing
             if hasattr(net, 's_values'):
                 net.s_values = []
-            if log_beta and hasattr(net, 'beta_values'):
+            if log_legacy_beta and hasattr(net, 'beta_values'):
                 net.beta_values = []
-            if log_beta and hasattr(net, 'beta_logits_values'):
+            if log_legacy_beta and hasattr(net, 'beta_logits_values'):
                 net.beta_logits_values = []
         
         print(f"[eval] Episode complete: {step_count} steps, reward = {reward_sum:.2f}")
@@ -355,7 +400,15 @@ def run_evaluation(net, env, args):
             'Vs': np.array(Vs),
             'Vs2': np.array(Vs2),
         }
-        if log_beta:
+        if beta1s:
+            episode_data['beta1s'] = np.array(beta1s)
+        if beta2s:
+            episode_data['beta2s'] = np.array(beta2s)
+        if terminated1s:
+            episode_data['terminated1s'] = np.array(terminated1s)
+        if terminated2s:
+            episode_data['terminated2s'] = np.array(terminated2s)
+        if log_legacy_beta:
             episode_data['betas'] = np.array(betas)
             episode_data['beta_logits'] = np.array(beta_logits)
             episode_data['beta_active'] = np.array(beta_active)
