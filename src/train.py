@@ -44,6 +44,11 @@ def _action_equal(a, b):
     return int(a.item()) == int(b.item())
 
 
+def _loss_scalar(x):
+    """Float for logging; losses may stay Python 0 if never updated."""
+    return float(x.item()) if torch.is_tensor(x) else float(x)
+
+
 def train(rank, args, shared_model, optimizer, env_conf, frames_total):
     ptitle(f"Train Agent: {rank}")
     gpu_id = args.gpu_ids[rank % len(args.gpu_ids)]
@@ -332,8 +337,8 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     writer = csv.writer(csvfile)
                     writer.writerow([
                         batch_count,
-                        policy_loss.item(),
-                        (0.5 * value_loss).item(),
+                        _loss_scalar(policy_loss),
+                        _loss_scalar(value_loss),
                         0,
                         0,
                     ])
