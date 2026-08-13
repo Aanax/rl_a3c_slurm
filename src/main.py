@@ -30,6 +30,11 @@ args.value_coef = config.getfloat('DEFAULT', 'value_coef', fallback=0.5)
 args.gamma = config.getfloat('DEFAULT', 'gamma', fallback=0.99)
 args.gamma_memory = config.getfloat('DEFAULT', 'gamma_memory', fallback=0.99)
 args.gamma2 = config.getfloat('DEFAULT', 'gamma2', fallback=0.99)
+# Actor discounts; fall back to critic gammas so old configs are unchanged.
+args.gamma_actor = config.getfloat('DEFAULT', 'gamma_actor', fallback=args.gamma)
+args.gamma2_actor = config.getfloat(
+    'DEFAULT', 'gamma2_actor', fallback=args.gamma2
+)
 args.tau = config.getfloat('DEFAULT', 'tau', fallback=1.00)
 args.seed = config.getint('DEFAULT', 'seed', fallback=1)
 args.workers = config.getint('DEFAULT', 'workers', fallback=32)

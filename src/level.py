@@ -100,7 +100,8 @@ class Level(nn.Module):
                 upper_options_dim == 0.
             bootstrap_only: if True, do not update current_action / monitoring.
             force_terminate: if True, skip beta sampling and resample from the
-                policy (used when a higher level terminates).
+                policy (higher-level terminate, or 1-step actions when
+                gamma_actor=0).
         """
         head_in = self._head_input(features, upper_options_onehot)
         logits = self.actor(head_in)

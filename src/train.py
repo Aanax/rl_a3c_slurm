@@ -27,6 +27,7 @@ def running_return_td(R, reward, value, gamma):
 
 
 def compute_level2_loss_v1(args, player, i, R2):
+    # L2 critic mixes V1 with (1 - gamma1_critic); gamma/gamma2 are critics.
     r2_i = player.values[i].detach() * (1 - args.gamma)
     R2, advantage2, delta2 = running_return_td(
         R2, r2_i, player.values2[i], args.gamma2
@@ -211,6 +212,8 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             has_beta2 = use_beta and len(player.betas2) == n_rewards
             # Hierarchial_levels: gate pi vs beta by sampled terminate flags.
             use_gated_beta = has_beta1 and has_beta2
+            gamma1_actor = getattr(args, 'gamma_actor', args.gamma)
+            gamma2_actor = getattr(args, 'gamma2_actor', args.gamma2)
 
             for i in reversed(range(n_rewards)):
                 R, advantage, delta = running_return_td(
@@ -235,8 +238,8 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     a1_logits_i,
                 )
                 level1_running_target = (
-                    args.gamma * level1_running_target
-                    + (1 - args.gamma) * sampled_target1
+                    gamma1_actor * level1_running_target
+                    + (1 - gamma1_actor) * sampled_target1
                 ).detach()
                 pred_log_prob1 = F.log_softmax(a1_logits_i, dim=1)
                 ce1_i = -(level1_running_target * pred_log_prob1).sum(dim=1)
@@ -247,17 +250,17 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     a2_logits_i,
                 )
                 level2_running_target = (
-                    args.gamma2 * level2_running_target
-                    + (1 - args.gamma2) * sampled_target
+                    gamma2_actor * level2_running_target
+                    + (1 - gamma2_actor) * sampled_target
                 ).detach()
                 pred_log_prob = F.log_softmax(a2_logits_i, dim=1)
                 ce_i = -(level2_running_target * pred_log_prob).sum(dim=1)
 
                 if use_gated_beta:
-                    # beta=1 -> learn policy; beta=0 -> learn beta; both on
-                    # sum of deltas. If beta2=1, beta1 is forced to 1 and only
-                    # both policies are trained. If beta2=0, sample beta1:
-                    # beta1=1 -> lower policy; beta1=0 -> learn beta1.
+                    # a1 is always 1-step (force_terminate), so pi1 is always
+                    # trained and beta1 is unused. beta2=1 -> pi2; beta2=0 ->
+                    # beta2. Extra: if beta2=1 but the same option was
+                    # resampled, also train beta2.
                     term2 = bool(player.option_terminated[i])
                     term1 = bool(player.action_terminated[i])
                     if term2:
@@ -272,6 +275,12 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                             policy_loss2 = (
                                 policy_loss2
                                 - (args.entropy_coef2 * player.entropies2[i])
+                            )
+                        if i > 0 and _action_equal(
+                            player.actions2[i], player.actions2[i - 1]
+                        ):
+                            beta_loss = (
+                                beta_loss + player.betas2[i] * actor_delta
                             )
                     else:
                         beta_loss = beta_loss + player.betas2[i] * actor_delta

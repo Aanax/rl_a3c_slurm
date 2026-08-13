@@ -24,6 +24,7 @@ Options:
     --window-size SIZE        Window size for value plots (default: 34)
     --panels P1 [P2 P3 P4]    Up to 4 params to draw on actions.mp4
                               Default: beta1 beta2 option2 action
+                              MP4s saved under panels_<p1>_<p2>_.../ (no overwrite)
 
 Available --panels names:
     beta1, beta2, option2, action, logits1, logits2,
@@ -616,10 +617,22 @@ def select_panels(available_panels, panel_names):
     return values_dict
 
 
+def panels_output_dirname(panel_names):
+    """Folder name for a panel combo, e.g. panels_beta1_beta2_option2_action."""
+    return 'panels_' + '_'.join(panel_names)
+
+
+def make_panels_output_dir(local_dir, panel_names):
+    """Create and return local_dir/panels_<p1>_<p2>_... for this --panels run."""
+    out_dir = os.path.join(local_dir, panels_output_dirname(panel_names))
+    os.makedirs(out_dir, exist_ok=True)
+    return out_dir
+
+
 def create_action_gif(
     data,
     eval_folder,
-    local_dir,
+    output_dir,
     fps=3,
     start_idx=0,
     stop_idx=300,
@@ -628,6 +641,7 @@ def create_action_gif(
 ):
     """
     Create actions visualization MP4 with up to 4 selected panels.
+    Saves to output_dir/actions.mp4 (caller should pass a panels-specific folder).
     """
     print("\n[draw] Creating actions visualization...")
     
@@ -677,7 +691,8 @@ def create_action_gif(
     dd = [k[:CROP_BELOW] for k in dd]
     
     # Save
-    output_path = os.path.join(local_dir, "actions.mp4")
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, "actions.mp4")
     print(f"[draw] Saving to {output_path}")
     imageio.mimsave(output_path, dd, fps=fps)
     print(f"[draw] Actions GIF saved!")
@@ -685,7 +700,7 @@ def create_action_gif(
     del dd
 
 
-def create_values_gif(data, eval_folder, local_dir, fps=3, start_idx=0, stop_idx=300, window_size=34):
+def create_values_gif(data, eval_folder, output_dir, fps=3, start_idx=0, stop_idx=300, window_size=34):
     """
     Create values visualization GIF showing V1, V2 and rewards.
     """
@@ -741,7 +756,8 @@ def create_values_gif(data, eval_folder, local_dir, fps=3, start_idx=0, stop_idx
     dd = [k[:CROP_BELOW] for k in dd]
     
     # Save
-    output_path = os.path.join(local_dir, "VS_short.mp4")
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, "VS_short.mp4")
     print(f"[draw] Saving to {output_path}")
     imageio.mimsave(output_path, dd, fps=fps)
     print(f"[draw] Values GIF saved!")
@@ -757,6 +773,9 @@ def main():
 Example:
     python src/draw_eval_gifs.py Eval_2024-12-04_21:58:10_cosineFix2_try2.468102
     python src/draw_eval_gifs.py Eval_xxx --panels beta1 beta2 option2 action --no-download
+
+MP4s are saved under Eval_xxx/panels_<p1>_<p2>_.../ so different --panels
+combos do not overwrite each other.
 
 Available --panels: beta1, beta2, option2, action, logits1, logits2,
                     beta_samples, betas, beta_active, terminated1, terminated2
@@ -805,10 +824,14 @@ Available --panels: beta1, beta2, option2, action, logits1, logits2,
         print(f"[main] ERROR: {e}")
         return
     
+    # npy inputs stay in local_dir; mp4s go to a panels-specific subfolder
+    out_dir = make_panels_output_dir(local_dir, panel_names)
+
     print(f"="*60)
     print(f"Evaluation Folder: {args.eval_folder}")
     print(f"Local Directory: {local_dir}")
     print(f"Action panels: {panel_names}")
+    print(f"Output Directory: {out_dir}")
     print(f"="*60)
     
     # Download files if requested
@@ -846,7 +869,7 @@ Available --panels: beta1, beta2, option2, action, logits1, logits2,
     # Create GIFs
     try:
         create_action_gif(
-            data, args.eval_folder, local_dir,
+            data, args.eval_folder, out_dir,
             fps=args.fps, start_idx=args.start_idx,
             stop_idx=args.stop_idx, window_size=args.window_size,
             panels=panel_names,
@@ -857,7 +880,7 @@ Available --panels: beta1, beta2, option2, action, logits1, logits2,
         traceback.print_exc()
     
     try:
-        create_values_gif(data, args.eval_folder, local_dir,
+        create_values_gif(data, args.eval_folder, out_dir,
                          fps=args.fps, start_idx=args.start_idx,
                          stop_idx=args.stop_idx, window_size=args.window_size)
     except Exception as e:
@@ -865,9 +888,9 @@ Available --panels: beta1, beta2, option2, action, logits1, logits2,
         import traceback
         traceback.print_exc()
     
-    print(f"\n[main] Done! Output files in: {local_dir}")
-    print(f"  - {os.path.join(local_dir, 'actions.mp4')}")
-    print(f"  - {os.path.join(local_dir, 'VS_short.mp4')}")
+    print(f"\n[main] Done! Output files in: {out_dir}")
+    print(f"  - {os.path.join(out_dir, 'actions.mp4')}")
+    print(f"  - {os.path.join(out_dir, 'VS_short.mp4')}")
 
 
 if __name__ == '__main__':

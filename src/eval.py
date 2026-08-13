@@ -106,6 +106,12 @@ def parse_args():
     print("Using gamma_memory ", args.gamma_memory)
     args.gamma2 = cfg.getfloat('DEFAULT', 'gamma2', fallback=0.99)
     print("Using gamma2 ", args.gamma2)
+    args.gamma_actor = cfg.getfloat('DEFAULT', 'gamma_actor', fallback=args.gamma)
+    args.gamma2_actor = cfg.getfloat(
+        'DEFAULT', 'gamma2_actor', fallback=args.gamma2
+    )
+    print("Using gamma_actor ", args.gamma_actor)
+    print("Using gamma2_actor ", args.gamma2_actor)
     args.tau = cfg.getfloat('DEFAULT', 'tau', fallback=1.0)
     args.skip_rate = cfg.getint('DEFAULT', 'skip_rate', fallback=4)
     args.max_episode_length = cli.max_episode_length
