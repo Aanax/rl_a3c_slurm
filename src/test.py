@@ -40,7 +40,8 @@ def test(args, shared_model, env_conf, frames_total):
 
     if args.tensorboard_logger:
         from torch.utils.tensorboard import SummaryWriter
-        dummy_input = (torch.zeros(1, player.env.observation_space.shape[0], 80, 80), torch.zeros(1, args.hidden_size), torch.zeros(1, args.hidden_size),  )
+        c, h, w = player.env.observation_space.shape
+        dummy_input = (torch.zeros(1, c, h, w), torch.zeros(1, args.hidden_size), torch.zeros(1, args.hidden_size),  )
         writer_path = f"runs/{args.experiment_name}/{args.experiment_name}_{args.env}_training_{args.parallel_id}"
         writer = SummaryWriter(writer_path)
         writer.add_graph(player.model, dummy_input, False)

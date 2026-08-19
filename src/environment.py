@@ -36,22 +36,30 @@ def atari_env(env_id, env_conf, args):
     return env
 
 
+def _screen_size(conf):
+    return int(conf.get("screen_size", 80))
+
+
+def _obs_hw(env):
+    shape = env.observation_space.shape
+    return int(shape[-2]), int(shape[-1])
+
+
 def process_frame(frame, conf):
-    frame = frame[conf["crop1"]:conf["crop2"] + 160, :160]
-#    frame = frame.mean(2)
-#    frame = frame.astype(np.float32)
-#    frame *= (1.0 / 255.0)
-#    frame = resize(frame, (80, conf["dimension2"]), interpolation=INTER_AREA)
-    frame = resize(frame, (80, 80), interpolation=INTER_AREA)
+    screen_size = _screen_size(conf)
+    if conf.get("crop", True):
+        frame = frame[conf["crop1"]:conf["crop2"] + 160, :160]
+    frame = resize(frame, (screen_size, screen_size), interpolation=INTER_AREA)
     frame = (0.2989 * frame[:,:,0] + 0.587 * frame[:,:,1] + 0.114 * frame[:,:,2])
-    frame = np.reshape(frame, [1, 80, 80]).astype(np.float32)
+    frame = np.reshape(frame, [1, screen_size, screen_size]).astype(np.float32)
     return frame
 
 
 class AtariRescale(gym.ObservationWrapper):
     def __init__(self, env, env_conf):
         gym.ObservationWrapper.__init__(self, env)
-        self.observation_space = Box(0.0, 1.0, [1, 80, 80], dtype=np.uint8)
+        size = _screen_size(env_conf)
+        self.observation_space = Box(0.0, 1.0, [1, size, size], dtype=np.uint8)
         self.conf = env_conf
 
     def observation(self, observation):
@@ -89,7 +97,8 @@ class NormalizedEnvDiffOnly(gym.ObservationWrapper):
         self.state_mean = 0
         self.alpha = getattr(args, 'normalization_alpha', 0.9999)
         self.num_steps = 0
-        self.previous_observation = np.zeros([1, 80, 80]).astype(np.float32)
+        h, w = _obs_hw(env)
+        self.previous_observation = np.zeros([1, h, w]).astype(np.float32)
 
     def observation(self, observation):
         observation = observation - self.previous_observation
@@ -115,8 +124,9 @@ class NormalizedEnvGameNormNoNormDiffOnNorm(gym.ObservationWrapper):
         self.state_std = 0
         self.alpha = getattr(args, 'normalization_alpha', 0.999)
         self.num_steps = 0
-        self.previous_observation = np.zeros([1, 80, 80]).astype(np.float32)
-        self.observation_space = Box(0.0, 1.0, [2, 80, 80], dtype=np.uint8)
+        h, w = _obs_hw(env)
+        self.previous_observation = np.zeros([1, h, w]).astype(np.float32)
+        self.observation_space = Box(0.0, 1.0, [2, h, w], dtype=np.uint8)
 
     def observation(self, observation):
         self.num_steps += 1
@@ -140,8 +150,9 @@ class NormalizedEnvDiffConcat1frameNorm(gym.ObservationWrapper):
     """
     def __init__(self, env=None, args=None):
         super().__init__(env)
-        self.previous_observation = np.zeros([1, 80, 80]).astype(np.float32)
-        self.observation_space = Box(0.0, 1.0, [2, 80, 80], dtype=np.uint8)
+        h, w = _obs_hw(env)
+        self.previous_observation = np.zeros([1, h, w]).astype(np.float32)
+        self.observation_space = Box(0.0, 1.0, [2, h, w], dtype=np.uint8)
 
     def observation(self, observation):
         observation_diff = observation - self.previous_observation
@@ -161,7 +172,8 @@ class NormalizedEnv(gym.ObservationWrapper):
     """
     def __init__(self, env=None, args=None):
         super().__init__(env)
-        self.observation_space = Box(0.0, 1.0, [1, 80, 80], dtype=np.uint8)
+        h, w = _obs_hw(env)
+        self.observation_space = Box(0.0, 1.0, [1, h, w], dtype=np.uint8)
 
     def observation(self, observation):
         return (observation - observation.mean()) / (observation.std() + 1e-8)
@@ -173,8 +185,9 @@ class NormalizedEnvDiffConcat1frameNormDiffFromNormed(gym.ObservationWrapper):
     """
     def __init__(self, env=None, args=None):
         super().__init__(env)
-        self.previous_observation = np.zeros([1, 80, 80]).astype(np.float32)
-        self.observation_space = Box(0.0, 1.0, [2, 80, 80], dtype=np.uint8)
+        h, w = _obs_hw(env)
+        self.previous_observation = np.zeros([1, h, w]).astype(np.float32)
+        self.observation_space = Box(0.0, 1.0, [2, h, w], dtype=np.uint8)
 
     def observation(self, observation):
         observation = (observation - observation.mean()) / (observation.std() + 1e-8)
@@ -191,8 +204,9 @@ class NormalizedEnvDiffConcat1frameNoNormDiffFromNormed(gym.ObservationWrapper):
     """
     def __init__(self, env=None, args=None):
         super().__init__(env)
-        self.previous_observation = np.zeros([1, 80, 80]).astype(np.float32)
-        self.observation_space = Box(0.0, 1.0, [2, 80, 80], dtype=np.uint8)
+        h, w = _obs_hw(env)
+        self.previous_observation = np.zeros([1, h, w]).astype(np.float32)
+        self.observation_space = Box(0.0, 1.0, [2, h, w], dtype=np.uint8)
 
     def observation(self, observation):
         observation = (observation - observation.mean()) / (observation.std() + 1e-8)
@@ -208,7 +222,8 @@ class NormalizedEnvPassThrough(gym.ObservationWrapper):
     """
     def __init__(self, env=None, args=None):
         super().__init__(env)
-        self.observation_space = Box(0.0, 1.0, [1, 80, 80], dtype=np.uint8)
+        h, w = _obs_hw(env)
+        self.observation_space = Box(0.0, 1.0, [1, h, w], dtype=np.uint8)
 
     def observation(self, observation):
         return observation
@@ -220,8 +235,9 @@ class NormalizedEnvAddDiffPassThrough(gym.ObservationWrapper):
     """
     def __init__(self, env=None, args=None):
         super().__init__(env)
-        self.previous_observation = np.zeros([1, 80, 80]).astype(np.float32)
-        self.observation_space = Box(0.0, 1.0, [2, 80, 80], dtype=np.uint8)
+        h, w = _obs_hw(env)
+        self.previous_observation = np.zeros([1, h, w]).astype(np.float32)
+        self.observation_space = Box(0.0, 1.0, [2, h, w], dtype=np.uint8)
 
     def observation(self, observation):
         observation_diff = observation - self.previous_observation
@@ -236,8 +252,9 @@ class NormalizedEnvFrameAndDiff1frameNormTogether(gym.ObservationWrapper):
     """
     def __init__(self, env=None, args=None):
         super().__init__(env)
-        self.previous_observation = np.zeros([1, 80, 80]).astype(np.float32)
-        self.observation_space = Box(0.0, 1.0, [2, 80, 80], dtype=np.uint8)
+        h, w = _obs_hw(env)
+        self.previous_observation = np.zeros([1, h, w]).astype(np.float32)
+        self.observation_space = Box(0.0, 1.0, [2, h, w], dtype=np.uint8)
 
     def observation(self, observation):
         observation_diff = observation - self.previous_observation
