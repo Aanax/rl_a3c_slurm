@@ -14,7 +14,7 @@ echo "CUDA EXPORTED"
 
 module load intel-compilers cuda/10.2
 
-source /s/ls4/users/aamore/anaconda3/bin/activate
+source /s/ls4/users/aamore/anaconda3/bin/activate pytorch_rl
 conda activate pytorch_rl
 
 echo "ACTIVATED"

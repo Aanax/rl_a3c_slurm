@@ -27,9 +27,6 @@
   "MsPacman": {
     "crop": false,
     "screen_size": 84
-    // "crop1": 2,
-    // "crop2": 10,
-    // "dimension2": 84
   },
   "Pong": {
     "crop1": 34,
