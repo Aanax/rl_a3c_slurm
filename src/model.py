@@ -24,12 +24,11 @@ HierarchialLevelsOutput = namedtuple(
         'x_restored',    # 5  unused
         'V2',            # 6  level-2 critic value
         'a2_logits',     # 7  level-2 option logits
-        'a1',            # 8  sampled/persisted level-1 action index
+        'a1',            # 8  sampled level-1 action index (resampled every step)
         'a2',            # 9  sampled/persisted level-2 option index
-        'beta1',         # 10 level-1 termination coeff (active action)
-        'beta2',         # 11 level-2 termination coeff (active option)
-        'terminated1',   # 12 whether level-1 action terminated this step
-        'terminated2',   # 13 whether level-2 option terminated this step
+        'beta2',         # 10 level-2 termination coeff (active option)
+        'terminated1',   # 11 level-1 always resamples; True every step
+        'terminated2',   # 12 whether level-2 option terminated this step
     ],
 )
 
@@ -567,11 +566,9 @@ class Hierarchial_levels(nn.Module):
 
     Level 2: s2 -> pi2 / V2 / beta2 (options; sticky via beta2).
              upper_options_dim=0 (top level, no higher option).
-    Level 1: concat(s1, a2_onehot) -> pi1 / V1 / beta1 (env actions).
+    Level 1: concat(s1, a2_onehot) -> pi1 / V1 (env actions).
              upper_options_dim=num_options (conditioned on active a2).
-             If gamma_actor=0, a1 is resampled every step and beta1 is unused.
-             Otherwise a1 is sticky via beta1, with subordination: beta2
-             terminate forces beta1 terminate.
+             a1 is resampled every step; level 1 has no beta.
 
     Returns HierarchialLevelsOutput (namedtuple; see field docs on that type).
     """
@@ -586,8 +583,6 @@ class Hierarchial_levels(nn.Module):
         num_outputs = action_space.n
         self.num_outputs = num_outputs
         self.num_options = getattr(args, 'num_options', 8)
-        # gamma_actor=0 => a1 lasts 1 step, always resample, skip beta1.
-        self.resample_a1_every_step = getattr(args, 'gamma_actor', 1.0) == 0.0
 
         use_rmsnorm = getattr(args, 'use_rmsnorm', False)
         feat1 = 64 * 4 * 4
@@ -606,6 +601,7 @@ class Hierarchial_levels(nn.Module):
             feat_dim=feat1,
             n_actions=num_outputs,
             upper_options_dim=self.num_options,
+            use_beta=False,
         )
 
         self.train()
@@ -635,16 +631,12 @@ class Hierarchial_levels(nn.Module):
 
         s2 = self.level2.encode(s1)
         out2 = self.level2.forward_heads(s2, bootstrap_only=bootstrap_only)
-        # gamma_actor=0: always resample a1. Else subordinate to beta2.
-        force_l1_terminate = (not bootstrap_only) and (
-            self.resample_a1_every_step or bool(out2.terminated)
-        )
         # a2_onehot is non-differentiable upper-option context for level-1 heads
         out1 = self.level1.forward_heads(
             s1,
             upper_options_onehot=out2.action_onehot.detach(),
             bootstrap_only=bootstrap_only,
-            force_terminate=force_l1_terminate,
+            force_terminate=not bootstrap_only,
         )
 
         return HierarchialLevelsOutput(
@@ -658,7 +650,6 @@ class Hierarchial_levels(nn.Module):
             a2_logits=out2.logits,
             a1=out1.action_idx,
             a2=out2.action_idx,
-            beta1=out1.beta_grad,
             beta2=out2.beta_grad,
             terminated1=out1.terminated,
             terminated2=out2.terminated,

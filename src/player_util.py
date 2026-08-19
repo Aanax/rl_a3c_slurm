@@ -30,7 +30,6 @@ class Agent(object):
         self.option_terminated = []
         self.action_terminated = []
         self.betas = []
-        self.betas1 = []
         self.betas2 = []
         self.states = []
         self.done = True
@@ -61,7 +60,6 @@ class Agent(object):
             logit2 = model_output.a2_logits
             action = model_output.a1.data
             action2 = model_output.a2
-            self.betas1.append(model_output.beta1)
             self.betas2.append(model_output.beta2)
             self.betas.append(model_output.beta2)
             self.action_terminated.append(model_output.terminated1)
@@ -192,7 +190,6 @@ class Agent(object):
         self.option_terminated = []
         self.action_terminated = []
         self.betas = []
-        self.betas1 = []
         self.betas2 = []
         self.states = []
         return self

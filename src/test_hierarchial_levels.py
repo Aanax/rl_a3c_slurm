@@ -37,16 +37,16 @@ def test_named_output_and_persistence():
     assert out[7] is out.a2_logits
     assert out[8] is out.a1
     assert out[9] is out.a2
-    assert out[10] is out.beta1
-    assert out[11] is out.beta2
+    assert out[10] is out.beta2
+    assert out[11] is out.terminated1
+    assert out[12] is out.terminated2
+    assert m.level1.beta is None
+    assert m.level1.use_beta is False
 
     opt_after = m.level2.current_action.clone()
-    act_after = m.level1.current_action.clone()
     m.level2.beta.bias.data.fill_(-50.0)
-    m.level1.beta.bias.data.fill_(-50.0)
     _ = m(x, None, None)
     assert torch.equal(m.level2.current_action, opt_after)
-    assert torch.equal(m.level1.current_action, act_after)
     print('test_named_output_and_persistence passed')
 
 

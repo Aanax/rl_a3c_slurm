@@ -22,11 +22,10 @@ Output format (saved as .npy files):
     Frames_normalized_orig.npy - Preprocessed frames (N, C, H, W)
     Q11s.npy - Level 1 logits (N, num_actions)
     Q22s.npy - Level 2 logits (N, num_options)
-    aas.npy - Selected actions (N, 1)  [sticky a1 for Hierarchial_levels]
+    aas.npy - Selected actions (N, 1)
     oos.npy - Option indices actually played (N, 1)
-    beta1s.npy - Level-1 termination coeff for chosen action (N, 1)
     beta2s.npy - Level-2 termination coeff for chosen option (N, 1)
-    terminated1s.npy - Level-1 terminate samples 0/1 (N, 1)
+    terminated1s.npy - Level-1 always resamples; 1 every step (N, 1)
     terminated2s.npy - Level-2 terminate samples 0/1 (N, 1)
     betas.npy / beta_logits.npy / beta_active.npy / beta_samples.npy - legacy beta dumps
     rewards.npy - Rewards (N,)
@@ -237,7 +236,6 @@ def _parse_model_output(model_output):
             'a2_logits': model_output.a2_logits,
             'a1_sample': model_output.a1,
             'a2_sample': model_output.a2,
-            'beta1': model_output.beta1,
             'beta2': model_output.beta2,
             'terminated1': model_output.terminated1,
             'terminated2': model_output.terminated2,
@@ -260,7 +258,6 @@ def _parse_model_output(model_output):
         'a2_logits': model_output[7],
         'a1_sample': None,
         'a2_sample': a2_sample,
-        'beta1': None,
         'beta2': beta_active,
         'terminated1': None,
         'terminated2': option_terminated,
@@ -302,9 +299,8 @@ def run_evaluation(net, env, args):
         beta_active = []  # Active termination beta for current option (legacy)
         oos = []  # Options actually played
         beta_samples = []  # Bernoulli terminate samples (legacy alias of terminated2)
-        beta1s = []  # Level-1 termination coeff for chosen action
         beta2s = []  # Level-2 termination coeff for chosen option
-        terminated1s = []  # Level-1 terminate samples
+        terminated1s = []  # Level-1 always resamples
         terminated2s = []  # Level-2 terminate samples
         rewards = []  # Rewards received
         Vs = []  # Level 1 values
@@ -332,12 +328,11 @@ def run_evaluation(net, env, args):
             a2_logits = parsed['a2_logits']
             a1_sample = parsed['a1_sample']
             a2_sample = parsed['a2_sample']
-            beta1_step = parsed['beta1']
             beta2_step = parsed['beta2']
             terminated1 = parsed['terminated1']
             terminated2 = parsed['terminated2']
             
-            # Prefer sticky a1 from Hierarchial_levels; otherwise greedy argmax
+            # Prefer sampled a1 from Hierarchial_levels; otherwise greedy argmax
             if a1_sample is not None:
                 action = int(_to_numpy_1d(a1_sample)[0])
             else:
@@ -353,8 +348,6 @@ def run_evaluation(net, env, args):
             aas.append([action])  # Action taken
             oos.append([int(_to_numpy_1d(a2_sample)[0])])  # Option actually played
 
-            if beta1_step is not None:
-                beta1s.append([_to_scalar_float(beta1_step)])
             if beta2_step is not None:
                 beta2s.append([_to_scalar_float(beta2_step)])
             if terminated1 is not None:
@@ -406,8 +399,6 @@ def run_evaluation(net, env, args):
             'Vs': np.array(Vs),
             'Vs2': np.array(Vs2),
         }
-        if beta1s:
-            episode_data['beta1s'] = np.array(beta1s)
         if beta2s:
             episode_data['beta2s'] = np.array(beta2s)
         if terminated1s:

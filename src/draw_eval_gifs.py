@@ -23,16 +23,16 @@ Options:
     --stop-idx STOP           Stop frame index (default: 300, -1 for all)
     --window-size SIZE        Window size for value plots (default: 34)
     --panels P1 [P2 P3 P4]    Up to 4 params to draw on actions.mp4
-                              Default: beta1 beta2 option2 action
+                              Default: beta2 option2 action
                               MP4s saved under panels_<p1>_<p2>_.../ (no overwrite)
 
 Available --panels names:
-    beta1, beta2, option2, action, logits1, logits2,
+    beta2, option2, action, logits1, logits2,
     beta_samples, betas, beta_active, terminated1, terminated2
 
 Example:
     python src/draw_eval_gifs.py Eval_2026-03-29_00:21:09_PongNoFrameskip-v4 --no-download
-    python src/draw_eval_gifs.py Eval_xxx --panels beta1 beta2 option2 action --no-download
+    python src/draw_eval_gifs.py Eval_xxx --panels beta2 option2 action --no-download
 """
 
 import torch
@@ -61,12 +61,11 @@ except ImportError:
     paramiko = None
 
 
-DEFAULT_ACTION_PANELS = ['beta1', 'beta2', 'option2', 'action']
+DEFAULT_ACTION_PANELS = ['beta2', 'option2', 'action']
 MAX_ACTION_PANELS = 4
 
 # Aliases -> canonical panel keys
 PANEL_ALIASES = {
-    'beta1': 'beta1',
     'beta2': 'beta2',
     'option': 'option2',
     'option2': 'option2',
@@ -336,7 +335,7 @@ def download_eval_files(eval_folder, local_dir, server, username, remote_project
     needed_suffixes = [
         'Q11s.npy', 'Q22s.npy', 'Q21s.npy', 'aas.npy', 'oos.npy',
         'betas.npy', 'beta_logits.npy', 'beta_active.npy', 'beta_samples.npy',
-        'beta1s.npy', 'beta2s.npy', 'terminated1s.npy', 'terminated2s.npy',
+        'beta2s.npy', 'terminated1s.npy', 'terminated2s.npy',
         'Frames_normalized_orig.npy', 'Vs.npy', 'Vs2.npy',
         'rewards.npy', 'gs2.npy', 'gs1.npy', 'ss.npy', 'ss2.npy'
     ]
@@ -408,7 +407,6 @@ def load_eval_data(eval_folder, local_dir):
         ('beta_samples.npy', 'beta_samples'),
         ('terminated1s.npy', 'terminated1'),
         ('terminated2s.npy', 'terminated2'),
-        ('beta1s.npy', 'beta1'),
         ('beta2s.npy', 'beta2'),
         ('betas.npy', 'betas'),
         ('Q11s.npy', 'Q_int'),
@@ -473,7 +471,6 @@ def build_available_panels(data):
     betas = data.get('betas')
     beta_active = data.get('beta_active')
     beta_samples = data.get('beta_samples')
-    beta1 = data.get('beta1')
     beta2 = data.get('beta2')
     terminated1 = data.get('terminated1')
     terminated2 = data.get('terminated2')
@@ -512,15 +509,6 @@ def build_available_panels(data):
             'plot_style': 'dots',
             'markersize': 7,
             'title': 'action (chosen)',
-        }
-    if beta1 is not None:
-        panels['beta1'] = {
-            'value': _as_col(beta1),
-            'legend': ['beta1'],
-            'ylim': (0.0, 1.0),
-            'plot_style': 'dots',
-            'markersize': 6,
-            'title': 'beta1',
         }
     if beta2 is not None:
         panels['beta2'] = {
@@ -618,7 +606,7 @@ def select_panels(available_panels, panel_names):
 
 
 def panels_output_dirname(panel_names):
-    """Folder name for a panel combo, e.g. panels_beta1_beta2_option2_action."""
+    """Folder name for a panel combo, e.g. panels_beta2_option2_action."""
     return 'panels_' + '_'.join(panel_names)
 
 
@@ -657,7 +645,6 @@ def create_action_gif(
         ('Q_ext', data.get('Q_ext')),
         ('option', data.get('option')),
         ('action', data.get('action')),
-        ('beta1', data.get('beta1')),
         ('beta2', data.get('beta2')),
         ('beta_samples', data.get('beta_samples')),
         ('betas', data.get('betas')),
@@ -772,12 +759,12 @@ def main():
         epilog="""
 Example:
     python src/draw_eval_gifs.py Eval_2024-12-04_21:58:10_cosineFix2_try2.468102
-    python src/draw_eval_gifs.py Eval_xxx --panels beta1 beta2 option2 action --no-download
+    python src/draw_eval_gifs.py Eval_xxx --panels beta2 option2 action --no-download
 
 MP4s are saved under Eval_xxx/panels_<p1>_<p2>_.../ so different --panels
 combos do not overwrite each other.
 
-Available --panels: beta1, beta2, option2, action, logits1, logits2,
+Available --panels: beta2, option2, action, logits1, logits2,
                     beta_samples, betas, beta_active, terminated1, terminated2
         """
     )

@@ -26,7 +26,7 @@ def _init_linear(linear, weight_scale=1.0):
 
 
 class Level(nn.Module):
-    """One hierarchical level: encoder + actor + critic + beta + sticky action.
+    """One hierarchical level: encoder + actor + critic + optional beta.
 
     Args:
         encoder: feature extractor for this level.
@@ -35,6 +35,8 @@ class Level(nn.Module):
         upper_options_dim: size of the higher-level option one-hot concatenated
             onto features before the actor/critic/beta heads. 0 means this
             level has no upper option context (e.g. the top level).
+        use_beta: if False, skip the beta head and resample every step
+            (level 1). If True, sticky actions via beta (level 2).
     """
 
     def __init__(
@@ -46,21 +48,24 @@ class Level(nn.Module):
         actor_weight_scale=0.01,
         critic_weight_scale=1.0,
         beta_weight_scale=0.01,
+        use_beta=True,
     ):
         super(Level, self).__init__()
         self.encoder = encoder
         self.feat_dim = feat_dim
         self.n_actions = n_actions
         self.upper_options_dim = upper_options_dim
+        self.use_beta = use_beta
         in_dim = feat_dim + upper_options_dim
 
         self.actor = nn.Linear(in_dim, n_actions)
         self.critic = nn.Linear(in_dim, 1)
-        self.beta = nn.Linear(in_dim, n_actions)
+        self.beta = nn.Linear(in_dim, n_actions) if use_beta else None
 
         _init_linear(self.actor, weight_scale=actor_weight_scale)
         _init_linear(self.critic, weight_scale=critic_weight_scale)
-        _init_linear(self.beta, weight_scale=beta_weight_scale)
+        if use_beta:
+            _init_linear(self.beta, weight_scale=beta_weight_scale)
 
         self.current_action = None
         self.last_beta_logits = None
@@ -70,7 +75,7 @@ class Level(nn.Module):
         return features
 
     def _head_input(self, features, upper_options_onehot=None):
-        """Build the vector fed to actor/critic/beta heads.
+        """Build the vector fed to actor/critic/(optional) beta heads.
 
         If upper_options_dim > 0, concatenates the higher-level option one-hot
         onto flattened features.
@@ -91,7 +96,7 @@ class Level(nn.Module):
         bootstrap_only=False,
         force_terminate=False,
     ):
-        """Run actor/critic/beta and sticky action sampling for this level.
+        """Run actor/critic/(optional) beta and action sampling for this level.
 
         Args:
             features: encoder output for this level.
@@ -100,17 +105,19 @@ class Level(nn.Module):
                 upper_options_dim == 0.
             bootstrap_only: if True, do not update current_action / monitoring.
             force_terminate: if True, skip beta sampling and resample from the
-                policy (higher-level terminate, or 1-step actions when
-                gamma_actor=0).
+                policy. Also implied when use_beta is False (except bootstrap).
         """
         head_in = self._head_input(features, upper_options_onehot)
         logits = self.actor(head_in)
         V = self.critic(head_in)
-        beta_logits = self.beta(head_in)
-        beta = torch.sigmoid(beta_logits)
-
-        if not bootstrap_only:
-            self.last_beta_logits = beta_logits.detach()
+        if self.use_beta:
+            beta_logits = self.beta(head_in)
+            beta = torch.sigmoid(beta_logits)
+            if not bootstrap_only:
+                self.last_beta_logits = beta_logits.detach()
+        else:
+            beta = None
+            force_terminate = force_terminate or not bootstrap_only
 
         probs = F.softmax(logits, dim=1)
         prev_action = self.current_action
@@ -148,7 +155,10 @@ class Level(nn.Module):
 
         # beta of the action chosen at this step; train updates beta when the
         # sampled terminate flag is 0, and the policy when it is 1.
-        beta_grad = (beta * action_onehot).sum(dim=1, keepdim=True)
+        if beta is None:
+            beta_grad = None
+        else:
+            beta_grad = (beta * action_onehot).sum(dim=1, keepdim=True)
 
         return LevelOut(
             V=V,

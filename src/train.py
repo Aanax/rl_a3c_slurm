@@ -208,10 +208,13 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             ).detach()
 
             n_rewards = len(player.rewards)
-            has_beta1 = use_beta and len(player.betas1) == n_rewards
             has_beta2 = use_beta and len(player.betas2) == n_rewards
-            # Hierarchial_levels: gate pi vs beta by sampled terminate flags.
-            use_gated_beta = has_beta1 and has_beta2
+            # Hierarchial_levels: gate pi2 vs beta2 by sampled terminate flags.
+            # Level 1 has no beta; pi1 is trained every step.
+            use_gated_beta = (
+                has_beta2
+                and isinstance(player.model, model.Hierarchial_levels)
+            )
             gamma1_actor = getattr(args, 'gamma_actor', args.gamma)
             gamma2_actor = getattr(args, 'gamma2_actor', args.gamma2)
 
@@ -257,20 +260,18 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 ce_i = -(level2_running_target * pred_log_prob).sum(dim=1)
 
                 if use_gated_beta:
-                    # a1 is always 1-step (force_terminate), so pi1 is always
-                    # trained and beta1 is unused. beta2=1 -> pi2; beta2=0 ->
-                    # beta2. Extra: if beta2=1 but the same option was
-                    # resampled, also train beta2.
+                    # a1 is always 1-step, so pi1 is always trained.
+                    # beta2=1 -> pi2; beta2=0 -> beta2. Extra: if beta2=1
+                    # but the same option was resampled, also train beta2.
                     term2 = bool(player.option_terminated[i])
-                    term1 = bool(player.action_terminated[i])
+                    policy_loss = policy_loss + ce1_i * actor_delta
+                    if args.entropy_coef > 0:
+                        policy_loss = (
+                            policy_loss
+                            - (args.entropy_coef * player.entropies[i])
+                        )
                     if term2:
-                        policy_loss = policy_loss + ce1_i * actor_delta
                         policy_loss2 = policy_loss2 + ce_i * actor_delta
-                        if args.entropy_coef > 0:
-                            policy_loss = (
-                                policy_loss
-                                - (args.entropy_coef * player.entropies[i])
-                            )
                         if args.entropy_coef2 > 0:
                             policy_loss2 = (
                                 policy_loss2
@@ -284,23 +285,8 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                             )
                     else:
                         beta_loss = beta_loss + player.betas2[i] * actor_delta
-                        if term1:
-                            policy_loss = policy_loss + ce1_i * actor_delta
-                            if args.entropy_coef > 0:
-                                policy_loss = (
-                                    policy_loss
-                                    - (args.entropy_coef * player.entropies[i])
-                                )
-                        else:
-                            beta_loss = (
-                                beta_loss + player.betas1[i] * actor_delta
-                            )
                 else:
                     if i + 1 < n_rewards:
-                        if has_beta1 and _action_equal(
-                            player.actions[i], player.actions[i + 1]
-                        ):
-                            beta_loss = beta_loss + player.betas1[i] * delta
                         if has_beta2 and _action_equal(
                             player.actions2[i], player.actions2[i + 1]
                         ):
