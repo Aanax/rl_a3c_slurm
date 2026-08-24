@@ -191,8 +191,10 @@ def draw_frames_with_info(values, images, experiment_title, start_idx=0, stop_id
 
     image_axs = plt.subplot(gs[0:n_values, 3:])
 
-    if stop_idx < 0:
-        stop_idx = len(images)
+    n_images = len(images)
+    if stop_idx < 0 or stop_idx > n_images:
+        stop_idx = n_images
+    start_idx = max(0, min(start_idx, n_images))
 
     # Start loop
     results = []
@@ -847,9 +849,11 @@ Available --panels: beta2, option2, action, logits1, logits2,
         print("[main] No frames data found! Cannot create GIFs.")
         return
     
-    # Adjust stop_idx if -1 (meaning all frames)
-    if args.stop_idx < 0:
-        args.stop_idx = len(data['frames'])
+    # Clamp to available frames (-1 or a default larger than the episode)
+    n_frames = len(data['frames'])
+    if args.stop_idx < 0 or args.stop_idx > n_frames:
+        args.stop_idx = n_frames
+    args.start_idx = max(0, min(args.start_idx, n_frames))
     
     print(f"\n[main] Creating GIFs for frames {args.start_idx} to {args.stop_idx}")
     
