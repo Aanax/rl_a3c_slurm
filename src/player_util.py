@@ -22,7 +22,6 @@ class Agent(object):
         self.log_probs2 = []
         self.rewards = []
         self.entropies = []
-        self.entropies2 = []
         self.actions = []
         self.actions2 = []
         self.a1_logits = []
@@ -86,10 +85,7 @@ class Agent(object):
 
         self.entropies.append(entropy)
 
-        prob2 = F.softmax(logit2, dim=1)
         log_prob2 = F.log_softmax(logit2, dim=1)
-        entropy2 = -(log_prob2 * prob2).sum(1)
-        self.entropies2.append(entropy2)
         action2 = action2.data
         log_prob2 = log_prob2.gather(1, action2)
         self.log_probs2.append(log_prob2)
@@ -182,7 +178,6 @@ class Agent(object):
         self.log_probs2 = []
         self.rewards = []
         self.entropies = []
-        self.entropies2 = []
         self.actions = []
         self.actions2 = []
         self.a1_logits = []

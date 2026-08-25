@@ -26,9 +26,12 @@ def running_return_td(R, reward, value, gamma):
     return R, advantage, advantage.detach()
 
 
-def compute_level2_loss_v1(args, player, i, R2):
+def compute_level2_loss_v1(args, player, i, R2, entropy_log_prob=None):
     # L2 critic mixes V1 with (1 - gamma1_critic); gamma/gamma2 are critics.
     r2_i = player.values[i].detach() * (1 - args.gamma)
+    if entropy_log_prob is not None:
+        eps = (1.0 - args.gamma2) * getattr(args, 'entropy_coef_level2', 1.0)
+        r2_i = r2_i - eps * entropy_log_prob
     R2, advantage2, delta2 = running_return_td(
         R2, r2_i, player.values2[i], args.gamma2
     )
@@ -39,6 +42,19 @@ def compute_level2_loss_v1(args, player, i, R2):
 def sampled_action_target(action, logits):
     target = torch.zeros_like(logits)
     return target.scatter(1, action, 1.0)
+
+
+def level2_pi_wave(logits, beta, iota):
+    """π̃ = (1-β)ι + βπ. If no previous option, π̃ = π."""
+    pi = F.softmax(logits, dim=1)
+    if iota is None:
+        return pi
+    return (1.0 - beta) * iota + beta * pi
+
+
+def level2_mixture_ce(target, pi_wave):
+    """CE(t, π̃); β in π̃ keeps grad so both π and β train."""
+    return -(target * pi_wave.clamp(min=1e-8).log()).sum(dim=1)
 
 
 def _action_equal(a, b):
@@ -115,6 +131,12 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             else:
                 player.cx = player.cx.data
                 player.hx = player.hx.data
+            # Option active before this n-step window (ι at i==0).
+            option2_before_batch = getattr(
+                player.model, 'current_option', None
+            )
+            if option2_before_batch is not None:
+                option2_before_batch = option2_before_batch.detach().clone()
             for step in range(num_steps):
                 player.action_train()
 
@@ -209,8 +231,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
 
             n_rewards = len(player.rewards)
             has_beta2 = use_beta and len(player.betas2) == n_rewards
-            # Hierarchial_levels: gate pi2 vs beta2 by sampled terminate flags.
-            # Level 1 has no beta; pi1 is trained every step.
+            # Hierarchial_levels: π̃ = (1-β)ι + βπ is the level-2 actor.
             use_gated_beta = (
                 has_beta2
                 and isinstance(player.model, model.Hierarchial_levels)
@@ -224,12 +245,40 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 )
                 value_loss = value_loss + 0.5 * advantage.pow(2)
 
+                a2_logits_i = player.a2_logits[i]
+                entropy_log_prob = None
+                pi_wave = None
+                if use_gated_beta:
+                    if i > 0:
+                        iota = sampled_action_target(
+                            player.actions2[i - 1], a2_logits_i
+                        )
+                    elif option2_before_batch is not None:
+                        iota = option2_before_batch
+                    else:
+                        iota = None
+                    pi_wave = level2_pi_wave(
+                        a2_logits_i, player.betas2[i], iota
+                    )
+                    entropy_log_prob = (
+                        pi_wave.clamp(min=1e-8).log()
+                        .gather(1, player.actions2[i])
+                        .detach()
+                    )
+                elif (
+                    i < len(player.option_terminated)
+                    and player.option_terminated[i]
+                ):
+                    entropy_log_prob = player.log_probs2[i].detach()
+
                 (
                     advantage2,
                     value_loss2_i,
                     delta2,
                     R2
-                ) = compute_level2_loss_v1(args, player, i, R2)
+                ) = compute_level2_loss_v1(
+                    args, player, i, R2, entropy_log_prob=entropy_log_prob
+                )
 
                 value_loss2 = value_loss2 + value_loss2_i
 
@@ -247,7 +296,6 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 pred_log_prob1 = F.log_softmax(a1_logits_i, dim=1)
                 ce1_i = -(level1_running_target * pred_log_prob1).sum(dim=1)
 
-                a2_logits_i = player.a2_logits[i]
                 sampled_target = sampled_action_target(
                     player.actions2[i],
                     a2_logits_i,
@@ -256,36 +304,19 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     gamma2_actor * level2_running_target
                     + (1 - gamma2_actor) * sampled_target
                 ).detach()
-                pred_log_prob = F.log_softmax(a2_logits_i, dim=1)
-                ce_i = -(level2_running_target * pred_log_prob).sum(dim=1)
 
                 if use_gated_beta:
-                    # a1 is always 1-step, so pi1 is always trained.
-                    # beta2=1 -> pi2; beta2=0 -> beta2. Extra: if beta2=1
-                    # but the same option was resampled, also train beta2.
-                    term2 = bool(player.option_terminated[i])
+                    ce_i = level2_mixture_ce(level2_running_target, pi_wave)
                     policy_loss = policy_loss + ce1_i * actor_delta
                     if args.entropy_coef > 0:
                         policy_loss = (
                             policy_loss
                             - (args.entropy_coef * player.entropies[i])
                         )
-                    if term2:
-                        policy_loss2 = policy_loss2 + ce_i * actor_delta
-                        if args.entropy_coef2 > 0:
-                            policy_loss2 = (
-                                policy_loss2
-                                - (args.entropy_coef2 * player.entropies2[i])
-                            )
-                        if i > 0 and _action_equal(
-                            player.actions2[i], player.actions2[i - 1]
-                        ):
-                            beta_loss = (
-                                beta_loss + player.betas2[i] * actor_delta
-                            )
-                    else:
-                        beta_loss = beta_loss + player.betas2[i] * actor_delta
+                    policy_loss2 = policy_loss2 + ce_i * actor_delta
                 else:
+                    pred_log_prob = F.log_softmax(a2_logits_i, dim=1)
+                    ce_i = -(level2_running_target * pred_log_prob).sum(dim=1)
                     if i + 1 < n_rewards:
                         if has_beta2 and _action_equal(
                             player.actions2[i], player.actions2[i + 1]
@@ -301,11 +332,6 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                             - (args.entropy_coef * player.entropies[i])
                         )
                     policy_loss2 = policy_loss2 + ce_i * actor_delta
-                    if args.entropy_coef2 > 0:
-                        policy_loss2 = (
-                            policy_loss2
-                            - (args.entropy_coef2 * player.entropies2[i])
-                        )
 
             value_loss = value_loss + value_loss2
             beta_term = args.beta_coef * beta_loss
