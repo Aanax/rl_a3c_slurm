@@ -121,15 +121,14 @@ class Level(nn.Module):
 
         probs = F.softmax(logits, dim=1)
         prev_action = self.current_action
+        has_prev = (
+            prev_action is not None and prev_action.size(0) == probs.size(0)
+        )
 
-        if bootstrap_only and prev_action is not None and prev_action.size(0) == probs.size(0):
+        if bootstrap_only and has_prev:
             action_idx = prev_action.argmax(dim=1, keepdim=True)
             terminated = False
-        elif (
-            force_terminate
-            or prev_action is None
-            or prev_action.size(0) != probs.size(0)
-        ):
+        elif force_terminate or not has_prev:
             # Fresh choice (episode start / higher-level terminate): treat as
             # terminated so training updates the policy, not beta.
             action_idx = probs.multinomial(1)
@@ -153,12 +152,15 @@ class Level(nn.Module):
         if not bootstrap_only:
             self.current_action = action_onehot.detach()
 
-        # beta of the action chosen at this step; train updates beta when the
-        # sampled terminate flag is 0, and the policy when it is 1.
+        # beta that gated the termination coin, i.e. beta of the action that was
+        # active before this step. This is the beta in the mixture the action
+        # was actually drawn from, pi_wave = (1 - beta) * prev + beta * pi.
+        # Without a previous action pi_wave = pi and this value is unused.
         if beta is None:
             beta_grad = None
         else:
-            beta_grad = (beta * action_onehot).sum(dim=1, keepdim=True)
+            gate_action = prev_action if has_prev else action_onehot
+            beta_grad = (beta * gate_action).sum(dim=1, keepdim=True)
 
         return LevelOut(
             V=V,

@@ -44,17 +44,51 @@ def sampled_action_target(action, logits):
     return target.scatter(1, action, 1.0)
 
 
-def level2_pi_wave(logits, beta, iota):
-    """π̃ = (1-β)ι + βπ. If no previous option, π̃ = π."""
-    pi = F.softmax(logits, dim=1)
+# Floor for the 1/pi_wave factors below.
+PI_WAVE_EPS = 1e-6
+
+
+def level2_pi_wave(pi, beta, iota):
+    """π̃ = (1-β)ι + βπ: the distribution options are actually drawn from.
+
+    ι is the one-hot option carried over from the previous step. With no
+    previous option the option is always sampled fresh, so π̃ = π.
+    """
     if iota is None:
         return pi
     return (1.0 - beta) * iota + beta * pi
 
 
-def level2_mixture_ce(target, pi_wave):
-    """CE(t, π̃); β in π̃ keeps grad so both π and β train."""
-    return -(target * pi_wave.clamp(min=1e-8).log()).sum(dim=1)
+def level2_choice_weight(pi, pi_wave, beta, iota):
+    """β·π/π̃ = P(the option was really (re)sampled here | executed option).
+
+    Importance-sampling correction for training π on options drawn from π̃:
+    steps where the option merely persisted get a near-zero weight, steps
+    where a genuine choice happened get ~1. Always lands in [0, 1], detached
+    so β trains only through its own loss.
+    """
+    if iota is None:
+        return torch.ones_like(pi)
+    return (beta * pi / (pi_wave + PI_WAVE_EPS)).detach()
+
+
+def level2_policy_ce(target, pi, weight):
+    """CE(t, π) with per-option importance weights."""
+    return -(target * weight * pi.clamp(min=1e-8).log()).sum(dim=1)
+
+
+def level2_beta_loss(pi, pi_wave, beta, iota, action, advantage):
+    """-A·∇_β log π̃ at the executed option; only β keeps a gradient.
+
+    Positive advantage after keeping the option pushes β down, positive
+    advantage after switching pushes β up. The 1/π̃ factor reaches 1/β on
+    switch steps, but β = sigmoid(logit) contributes a matching β(1-β), so the
+    gradient w.r.t. the β logits stays bounded by |A|.
+    """
+    pi_a = pi.gather(1, action).detach()
+    iota_a = iota.gather(1, action).detach()
+    pi_wave_a = pi_wave.gather(1, action).detach()
+    return (iota_a - pi_a) * advantage * beta / (pi_wave_a + PI_WAVE_EPS)
 
 
 def _action_equal(a, b):
@@ -247,21 +281,22 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
 
                 a2_logits_i = player.a2_logits[i]
                 entropy_log_prob = None
+                pi2 = None
                 pi_wave = None
+                iota = None
                 if use_gated_beta:
                     if i > 0:
                         iota = sampled_action_target(
                             player.actions2[i - 1], a2_logits_i
                         )
-                    elif option2_before_batch is not None:
-                        iota = option2_before_batch
                     else:
-                        iota = None
-                    pi_wave = level2_pi_wave(
-                        a2_logits_i, player.betas2[i], iota
-                    )
+                        iota = option2_before_batch
+                    pi2 = F.softmax(a2_logits_i, dim=1)
+                    pi_wave = level2_pi_wave(pi2, player.betas2[i], iota)
+                    # Bonus on π, not π̃: under π̃ the agent could farm entropy
+                    # by driving β to 1 and switching option every step.
                     entropy_log_prob = (
-                        pi_wave.clamp(min=1e-8).log()
+                        pi2.clamp(min=1e-8).log()
                         .gather(1, player.actions2[i])
                         .detach()
                     )
@@ -306,7 +341,12 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 ).detach()
 
                 if use_gated_beta:
-                    ce_i = level2_mixture_ce(level2_running_target, pi_wave)
+                    weight = level2_choice_weight(
+                        pi2, pi_wave, player.betas2[i], iota
+                    )
+                    ce_i = level2_policy_ce(
+                        level2_running_target, pi2, weight
+                    )
                     policy_loss = policy_loss + ce1_i * actor_delta
                     if args.entropy_coef > 0:
                         policy_loss = (
@@ -314,6 +354,11 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                             - (args.entropy_coef * player.entropies[i])
                         )
                     policy_loss2 = policy_loss2 + ce_i * actor_delta
+                    if iota is not None:
+                        beta_loss = beta_loss + level2_beta_loss(
+                            pi2, pi_wave, player.betas2[i], iota,
+                            player.actions2[i], actor_delta
+                        )
                 else:
                     pred_log_prob = F.log_softmax(a2_logits_i, dim=1)
                     ce_i = -(level2_running_target * pred_log_prob).sum(dim=1)
