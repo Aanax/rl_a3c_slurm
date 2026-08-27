@@ -74,7 +74,7 @@ def level2_choice_weight(pi, pi_wave, beta, iota):
 
 def level2_policy_ce(target, pi, weight):
     """CE(t, π) with per-option importance weights."""
-    return -(target * weight * pi.clamp(min=1e-8).log()).sum(dim=1)
+    return -(target * weight * (pi + 1e-8).log()).sum(dim=1)
 
 
 def level2_beta_loss(pi, pi_wave, beta, iota, action, advantage):
@@ -223,20 +223,16 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 )
 
                 # HierarchialLevelsOutput has named fields; legacy models use
-                # the same layout for V1 / a1_logits / V2 / a2_logits at
-                # indices 0 / 1 / 6 / 7.
+                # the same layout for V1 / V2 / a2_logits at indices 0 / 6 / 7.
                 if isinstance(model_output, model.HierarchialLevelsOutput):
                     R = model_output.V1.detach()
                     R2 = model_output.V2.detach()
-                    bootstrap_a1_logits = model_output.a1_logits
                     bootstrap_a2_logits = model_output.a2_logits
                 else:
                     R = model_output[0].detach()
                     R2 = model_output[6].detach()
-                    bootstrap_a1_logits = model_output[1]
                     bootstrap_a2_logits = model_output[7]
             else:
-                bootstrap_a1_logits = None
                 bootstrap_a2_logits = None
 
             player.values.append(R)
@@ -248,13 +244,6 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             value_loss2 = 0
             beta_loss = 0
             last_idx = len(player.rewards) - 1
-            if bootstrap_a1_logits is not None:
-                init_a1_logits = bootstrap_a1_logits
-            else:
-                init_a1_logits = player.a1_logits[last_idx]
-            level1_running_target = F.softmax(
-                init_a1_logits, dim=1
-            ).detach()
             if bootstrap_a2_logits is not None:
                 init_a2_logits = bootstrap_a2_logits
             else:
@@ -270,7 +259,6 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 has_beta2
                 and isinstance(player.model, model.Hierarchial_levels)
             )
-            gamma1_actor = getattr(args, 'gamma_actor', args.gamma)
             gamma2_actor = getattr(args, 'gamma2_actor', args.gamma2)
 
             for i in reversed(range(n_rewards)):
@@ -293,10 +281,10 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                         iota = option2_before_batch
                     pi2 = F.softmax(a2_logits_i, dim=1)
                     pi_wave = level2_pi_wave(pi2, player.betas2[i], iota)
-                    # Bonus on π, not π̃: under π̃ the agent could farm entropy
-                    # by driving β to 1 and switching option every step.
+                    # Bonus on π̃, not π: under π the agent could farm entropy
+                    # by driving β to 0 (always stick) while π stays diffuse.
                     entropy_log_prob = (
-                        pi2.clamp(min=1e-8).log()
+                        (pi_wave + PI_WAVE_EPS).log()
                         .gather(1, player.actions2[i])
                         .detach()
                     )
@@ -320,16 +308,8 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 actor_delta = delta + delta2
 
                 a1_logits_i = player.a1_logits[i]
-                sampled_target1 = sampled_action_target(
-                    player.actions[i],
-                    a1_logits_i,
-                )
-                level1_running_target = (
-                    gamma1_actor * level1_running_target
-                    + (1 - gamma1_actor) * sampled_target1
-                ).detach()
                 pred_log_prob1 = F.log_softmax(a1_logits_i, dim=1)
-                ce1_i = -(level1_running_target * pred_log_prob1).sum(dim=1)
+                neg_log_prob1_i = -pred_log_prob1.gather(1, player.actions[i])
 
                 sampled_target = sampled_action_target(
                     player.actions2[i],
@@ -347,7 +327,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     ce_i = level2_policy_ce(
                         level2_running_target, pi2, weight
                     )
-                    policy_loss = policy_loss + ce1_i * actor_delta
+                    policy_loss = policy_loss + neg_log_prob1_i * actor_delta
                     if args.entropy_coef > 0:
                         policy_loss = (
                             policy_loss
@@ -370,7 +350,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                                 beta_loss + player.betas2[i] * delta2
                             )
 
-                    policy_loss = policy_loss + ce1_i * actor_delta
+                    policy_loss = policy_loss + neg_log_prob1_i * actor_delta
                     if args.entropy_coef > 0:
                         policy_loss = (
                             policy_loss
