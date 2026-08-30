@@ -22,6 +22,9 @@ Options:
     --start-idx START         Start frame index (default: 0)
     --stop-idx STOP           Stop frame index (default: 300, -1 for all)
     --window-size SIZE        Window size for value plots (default: 34)
+    --actions {auto,pong,pacman}
+                              Action names for logits1 (default: auto from Q11s width:
+                              6=Pong, 9=MsPacman; leftover columns labeled aN)
     --panels P1 [P2 P3 P4]    Up to 4 params to draw on actions.mp4
                               Default: beta2 option2 action
                               MP4s saved under panels_<p1>_<p2>_.../ (no overwrite)
@@ -64,6 +67,16 @@ except ImportError:
 DEFAULT_ACTION_PANELS = ['beta2', 'option2', 'action']
 MAX_ACTION_PANELS = 4
 
+PONG_ACTIONS = ["noop", "fire", "right", "left", "rightfire", "leftfire"]
+PACMAN_ACTIONS = [
+    "noop", "up", "right", "left", "down",
+    "upright", "upleft", "downright", "downleft",
+]
+ACTION_LEGENDS = {
+    'pong': PONG_ACTIONS,
+    'pacman': PACMAN_ACTIONS,
+}
+
 # Aliases -> canonical panel keys
 PANEL_ALIASES = {
     'beta2': 'beta2',
@@ -82,6 +95,38 @@ PANEL_ALIASES = {
     'terminated1': 'terminated1',
     'terminated2': 'terminated2',
 }
+
+
+def _n_discrete_actions(data):
+    """Number of level-1 actions from Q11s width, else max(action)+1."""
+    Q_int = data.get('Q_int')
+    if Q_int is not None and Q_int.ndim > 1 and Q_int.shape[1] > 0:
+        return int(Q_int.shape[1])
+    actions = data.get('action')
+    if actions is not None and np.size(actions):
+        return int(np.max(actions)) + 1
+    return 0
+
+
+def resolve_action_legend(n_actions, actions_arg='auto'):
+    """Return n_actions labels. auto: 6=Pong, 9=MsPacman; extras are aN."""
+    if n_actions <= 0:
+        return []
+    if actions_arg in ACTION_LEGENDS:
+        names = list(ACTION_LEGENDS[actions_arg])
+        source = actions_arg
+    elif n_actions == len(PONG_ACTIONS):
+        names = list(PONG_ACTIONS)
+        source = 'pong (auto)'
+    elif n_actions == len(PACMAN_ACTIONS):
+        names = list(PACMAN_ACTIONS)
+        source = 'pacman (auto)'
+    else:
+        names = []
+        source = f'generic ({n_actions} actions)'
+    legend = [names[i] if i < len(names) else f'a{i}' for i in range(n_actions)]
+    print(f"[draw] Action legend ({source}): {legend}")
+    return legend
 
 
 def _as_col(arr):
@@ -461,9 +506,9 @@ def normalize_panel_names(panel_names):
     return normalized
 
 
-def build_available_panels(data):
+def build_available_panels(data, actions_arg='auto'):
     """Build a dict of panel_key -> panel_cfg from loaded eval arrays."""
-    action_legend = ["noop", "fire", "right", "left", "rightfire", "leftfire"]
+    action_legend = resolve_action_legend(_n_discrete_actions(data), actions_arg)
     panels = {}
 
     Q_int = data.get('Q_int')
@@ -478,9 +523,11 @@ def build_available_panels(data):
     terminated2 = data.get('terminated2')
 
     if Q_int is not None:
+        n_cols = Q_int.shape[1] if Q_int.ndim > 1 else 1
         panels['logits1'] = {
             'value': Q_int,
-            'legend': action_legend[:Q_int.shape[1]] if len(Q_int.shape) > 1 else action_legend,
+            'legend': action_legend[:n_cols] if action_legend else [f'a{i}' for i in range(n_cols)],
+            'plot_columns': n_cols > 1,
             'title': 'logits1 (level1)',
         }
     if Q_ext is not None:
@@ -628,6 +675,7 @@ def create_action_gif(
     stop_idx=300,
     window_size=34,
     panels=None,
+    actions='auto',
 ):
     """
     Create actions visualization MP4 with up to 4 selected panels.
@@ -639,7 +687,7 @@ def create_action_gif(
     panel_names = normalize_panel_names(panels)
     print(f"[draw] Requested panels: {panel_names}")
 
-    available = build_available_panels(data)
+    available = build_available_panels(data, actions_arg=actions)
     print(f"[draw] Available panels: {sorted(available.keys())}")
 
     for key, arr in [
@@ -762,6 +810,7 @@ def main():
 Example:
     python src/draw_eval_gifs.py Eval_2024-12-04_21:58:10_cosineFix2_try2.468102
     python src/draw_eval_gifs.py Eval_xxx --panels beta2 option2 action --no-download
+    python src/draw_eval_gifs.py Eval_xxx --actions pacman --panels logits1 --no-download
 
 MP4s are saved under Eval_xxx/panels_<p1>_<p2>_.../ so different --panels
 combos do not overwrite each other.
@@ -791,6 +840,16 @@ Available --panels: beta2, option2, action, logits1, logits2,
                        help='Stop frame index (default: 300, -1 for all)')
     parser.add_argument('--window-size', type=int, default=34,
                        help='Window size for value plots (default: 34)')
+    parser.add_argument(
+        '--actions',
+        choices=['auto', 'pong', 'pacman'],
+        default='auto',
+        help=(
+            'Action names for logits1 (default: auto). '
+            'auto uses 6=Pong, 9=MsPacman from Q11s width; '
+            'extra columns are labeled aN'
+        ),
+    )
     parser.add_argument(
         '--panels',
         nargs='+',
@@ -864,6 +923,7 @@ Available --panels: beta2, option2, action, logits1, logits2,
             fps=args.fps, start_idx=args.start_idx,
             stop_idx=args.stop_idx, window_size=args.window_size,
             panels=panel_names,
+            actions=args.actions,
         )
     except Exception as e:
         print(f"[main] Error creating action GIF: {e}")
