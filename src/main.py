@@ -28,6 +28,9 @@ args.entropy_coef = config.getfloat('DEFAULT', 'entropy_coef', fallback=0.01)
 args.entropy_coef_level2 = config.getfloat(
     'DEFAULT', 'entropy_coef_level2', fallback=1.0
 )
+args.entropy_neg_log_pi = config.getboolean(
+    'DEFAULT', 'entropy_neg_log_pi', fallback=False
+)
 args.value_coef = config.getfloat('DEFAULT', 'value_coef', fallback=0.5)
 args.gamma = config.getfloat('DEFAULT', 'gamma', fallback=0.99)
 args.gamma_memory = config.getfloat('DEFAULT', 'gamma_memory', fallback=0.99)
