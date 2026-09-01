@@ -68,8 +68,8 @@ class Agent(object):
 
             log_prob_all = F.log_softmax(logit, dim=1)
             prob = F.softmax(logit, dim=1)
-            entropy = -(log_prob_all * prob).sum(1)
             log_prob = log_prob_all.gather(1, action)
+            entropy = -log_prob
         else:
             value_int = None
             (
@@ -82,9 +82,9 @@ class Agent(object):
 
             prob = F.softmax(logit, dim=1)
             log_prob = F.log_softmax(logit, dim=1)
-            entropy = -(log_prob * prob).sum(1)
             action = prob.multinomial(1).data
             log_prob = log_prob.gather(1, action)
+            entropy = -log_prob
 
         self.entropies.append(entropy)
 

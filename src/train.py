@@ -291,10 +291,8 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                         iota = option2_before_batch
                     pi2 = F.softmax(a2_logits_i, dim=1)
                     pi_wave = level2_pi_wave(pi2, player.betas2[i], iota)
-                    # Bonus on π̃, not π: under π the agent could farm entropy
-                    # by driving β to 0 (always stick) while π stays diffuse.
                     entropy_log_prob = (
-                        (pi_wave + PI_WAVE_EPS).log()
+                        -F.log_softmax(a2_logits_i, dim=1)
                         .gather(1, player.actions2[i])
                         .detach()
                     )
@@ -302,7 +300,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     i < len(player.option_terminated)
                     and player.option_terminated[i]
                 ):
-                    entropy_log_prob = player.log_probs2[i].detach()
+                    entropy_log_prob = -player.log_probs2[i].detach()
 
                 (
                     advantage2,
