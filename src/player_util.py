@@ -18,6 +18,7 @@ class Agent(object):
         self.args = args
         self.values = []
         self.values2 = []
+        self.values_int = []
         self.log_probs = []
         self.log_probs2 = []
         self.rewards = []
@@ -52,6 +53,7 @@ class Agent(object):
 
         if isinstance(model_output, HierarchialLevelsOutput):
             value = model_output.V1
+            value_int = model_output.V1_int
             logit = model_output.a1_logits
             self.hx = model_output.hx
             self.cx = model_output.cx
@@ -69,6 +71,7 @@ class Agent(object):
             entropy = -(log_prob_all * prob).sum(1)
             log_prob = log_prob_all.gather(1, action)
         else:
+            value_int = None
             (
                 value, logit, self.hx, self.cx, _, _, value2, logit2,
                 action2, beta_active, option_terminated
@@ -119,6 +122,8 @@ class Agent(object):
         self.eps_len += 1
         self.reward = max(min(self.reward, 1), -1)
         self.values.append(value)
+        if value_int is not None:
+            self.values_int.append(value_int)
         self.log_probs.append(log_prob)
         self.actions.append(action)
         self.a1_logits.append(logit)
@@ -174,6 +179,7 @@ class Agent(object):
     def clear_actions(self):
         self.values = []
         self.values2 = []
+        self.values_int = []
         self.log_probs = []
         self.log_probs2 = []
         self.rewards = []

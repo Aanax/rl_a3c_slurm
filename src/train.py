@@ -209,9 +209,15 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 with torch.cuda.device(gpu_id):
                     R = torch.zeros(1, 1).cuda()
                     R2 = torch.zeros(1, 1).cuda()
+                    R_int = torch.zeros(1, 1).cuda()
             else:
                 R = torch.zeros(1, 1)
                 R2 = torch.zeros(1, 1)
+                R_int = torch.zeros(1, 1)
+
+            use_two_streams = isinstance(
+                player.model, model.Hierarchial_levels
+            )
 
             model_output = None
             if not player.done:
@@ -227,6 +233,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 if isinstance(model_output, model.HierarchialLevelsOutput):
                     R = model_output.V1.detach()
                     R2 = model_output.V2.detach()
+                    R_int = model_output.V1_int.detach()
                     bootstrap_a2_logits = model_output.a2_logits
                 else:
                     R = model_output[0].detach()
@@ -237,9 +244,12 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
 
             player.values.append(R)
             player.values2.append(R2)
+            if use_two_streams:
+                player.values_int.append(R_int)
 
             policy_loss = 0
             value_loss = 0
+            value_loss_int = 0
             policy_loss2 = 0
             value_loss2 = 0
             beta_loss = 0
@@ -305,7 +315,18 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
 
                 value_loss2 = value_loss2 + value_loss2_i
 
-                actor_delta = delta + delta2
+                if use_two_streams:
+                    # r_int = (1-gamma1) * V2(s'): V2 at end of step i
+                    r_int_i = player.values2[i + 1].detach() * (1 - args.gamma)
+                    R_int, advantage_int, delta_int = running_return_td(
+                        R_int, r_int_i, player.values_int[i], args.gamma
+                    )
+                    value_loss_int = value_loss_int + 0.5 * advantage_int.pow(2)
+                    actor1_delta = delta + delta_int
+                    actor2_delta = delta2
+                else:
+                    actor1_delta = delta + delta2
+                    actor2_delta = actor1_delta
 
                 a1_logits_i = player.a1_logits[i]
                 pred_log_prob1 = F.log_softmax(a1_logits_i, dim=1)
@@ -327,17 +348,17 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     ce_i = level2_policy_ce(
                         level2_running_target, pi2, weight
                     )
-                    policy_loss = policy_loss + neg_log_prob1_i * actor_delta
+                    policy_loss = policy_loss + neg_log_prob1_i * actor1_delta
                     if args.entropy_coef > 0:
                         policy_loss = (
                             policy_loss
                             - (args.entropy_coef * player.entropies[i])
                         )
-                    policy_loss2 = policy_loss2 + ce_i * actor_delta
+                    policy_loss2 = policy_loss2 + ce_i * actor2_delta
                     if iota is not None:
                         beta_loss = beta_loss + level2_beta_loss(
                             pi2, pi_wave, player.betas2[i], iota,
-                            player.actions2[i], actor_delta
+                            player.actions2[i], actor2_delta
                         )
                 else:
                     pred_log_prob = F.log_softmax(a2_logits_i, dim=1)
@@ -350,15 +371,15 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                                 beta_loss + player.betas2[i] * delta2
                             )
 
-                    policy_loss = policy_loss + neg_log_prob1_i * actor_delta
+                    policy_loss = policy_loss + neg_log_prob1_i * actor1_delta
                     if args.entropy_coef > 0:
                         policy_loss = (
                             policy_loss
                             - (args.entropy_coef * player.entropies[i])
                         )
-                    policy_loss2 = policy_loss2 + ce_i * actor_delta
+                    policy_loss2 = policy_loss2 + ce_i * actor2_delta
 
-            value_loss = value_loss + value_loss2
+            value_loss = value_loss + value_loss2 + value_loss_int
             beta_term = args.beta_coef * beta_loss
             total_loss = (
                 policy_loss + policy_loss2 + value_loss

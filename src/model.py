@@ -29,6 +29,7 @@ HierarchialLevelsOutput = namedtuple(
         'beta2',         # 10 level-2 termination coeff (active option)
         'terminated1',   # 11 level-1 always resamples; True every step
         'terminated2',   # 12 whether level-2 option terminated this step
+        'V1_int',        # 13 level-1 internal critic (top-down from V2)
     ],
 )
 
@@ -566,7 +567,7 @@ class Hierarchial_levels(nn.Module):
 
     Level 2: s2 -> pi2 / V2 / beta2 (options; sticky via beta2).
              upper_options_dim=0 (top level, no higher option).
-    Level 1: concat(s1, a2_onehot) -> pi1 / V1 (env actions).
+    Level 1: concat(s1, a2_onehot) -> pi1 / V1 (env) / V1_int (top-down).
              upper_options_dim=num_options (conditioned on active a2).
              a1 is resampled every step; level 1 has no beta.
 
@@ -602,6 +603,7 @@ class Hierarchial_levels(nn.Module):
             n_actions=num_outputs,
             upper_options_dim=self.num_options,
             use_beta=False,
+            use_internal_critic=True,
         )
 
         self.train()
@@ -653,5 +655,6 @@ class Hierarchial_levels(nn.Module):
             beta2=out2.beta_grad,
             terminated1=out1.terminated,
             terminated2=out2.terminated,
+            V1_int=out1.V_int,
         )
 

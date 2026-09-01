@@ -12,7 +12,10 @@ import torch.nn.functional as F
 
 LevelOut = namedtuple(
     'LevelOut',
-    ['V', 'logits', 'action_idx', 'action_onehot', 'beta_grad', 'terminated'],
+    [
+        'V', 'logits', 'action_idx', 'action_onehot', 'beta_grad', 'terminated',
+        'V_int',
+    ],
 )
 
 
@@ -37,6 +40,8 @@ class Level(nn.Module):
             level has no upper option context (e.g. the top level).
         use_beta: if False, skip the beta head and resample every step
             (level 1). If True, sticky actions via beta (level 2).
+        use_internal_critic: if True, add a second value head (V_int) for
+            top-down reward from the level above.
     """
 
     def __init__(
@@ -49,6 +54,7 @@ class Level(nn.Module):
         critic_weight_scale=1.0,
         beta_weight_scale=0.01,
         use_beta=True,
+        use_internal_critic=False,
     ):
         super(Level, self).__init__()
         self.encoder = encoder
@@ -56,14 +62,20 @@ class Level(nn.Module):
         self.n_actions = n_actions
         self.upper_options_dim = upper_options_dim
         self.use_beta = use_beta
+        self.use_internal_critic = use_internal_critic
         in_dim = feat_dim + upper_options_dim
 
         self.actor = nn.Linear(in_dim, n_actions)
         self.critic = nn.Linear(in_dim, 1)
+        self.critic_int = (
+            nn.Linear(in_dim, 1) if use_internal_critic else None
+        )
         self.beta = nn.Linear(in_dim, n_actions) if use_beta else None
 
         _init_linear(self.actor, weight_scale=actor_weight_scale)
         _init_linear(self.critic, weight_scale=critic_weight_scale)
+        if use_internal_critic:
+            _init_linear(self.critic_int, weight_scale=critic_weight_scale)
         if use_beta:
             _init_linear(self.beta, weight_scale=beta_weight_scale)
 
@@ -110,6 +122,7 @@ class Level(nn.Module):
         head_in = self._head_input(features, upper_options_onehot)
         logits = self.actor(head_in)
         V = self.critic(head_in)
+        V_int = self.critic_int(head_in) if self.critic_int is not None else None
         if self.use_beta:
             beta_logits = self.beta(head_in)
             beta = torch.sigmoid(beta_logits)
@@ -169,6 +182,7 @@ class Level(nn.Module):
             action_onehot=action_onehot,
             beta_grad=beta_grad,
             terminated=terminated,
+            V_int=V_int,
         )
 
     def reset_action(self):
