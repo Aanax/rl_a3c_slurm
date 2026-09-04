@@ -101,4 +101,7 @@ Based on Asynchronous Methods for Deep Reinforcement Learning (Mnih et al., 2016
 
 
 
-## по две кривых сгаммаа 0 для 1 уровня
+
+## Useful
+drawing gifs
+```python src/draw_eval_gifs.py logs/eval/Eval_2026-09-03_19:58:47_best_steps7888809_score1890 --panels beta2 option2 logits2 logits1 --no-download```

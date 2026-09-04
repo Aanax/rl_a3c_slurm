@@ -1,7 +1,8 @@
 """
 draw_eval_gifs.py — Download evaluation results from remote server and create visualization GIFs.
 
-This script downloads evaluation artifacts from a remote server (via SSH/SFTP),
+This script downloads evaluation artifacts from a remote server (paramiko SFTP by
+default; OpenSSH rsync with --rsync for hosts that need ssh-rsa),
 then creates two MP4 videos:
   1. actions.mp4 - Configurable panels (max 4) overlaid on frames
   2. VS_short.mp4 - Shows V1, V2 values and rewards over time
@@ -17,6 +18,7 @@ Options:
     --server SERVER           Server SSH name/address (default: ui4.computing.kiae.ru)
     --username USERNAME       SSH username (default: aamore)
     --remote-path PATH        Remote project path (default: /home/users/aamore/rl_a3c_slurm/)
+    --rsync                   Download via OpenSSH rsync instead of paramiko
     --no-download             Skip download (use local files if they exist)
     --fps FPS                 FPS for output GIFs (default: 3)
     --start-idx START         Start frame index (default: 0)
@@ -54,14 +56,26 @@ import sys
 import time
 import argparse
 from matplotlib import gridspec
+import shlex
 
-# Optional paramiko import (only needed for remote downloads)
+# Optional paramiko import (used for default SFTP download)
 try:
     import paramiko
     HAS_PARAMIKO = True
 except ImportError:
     HAS_PARAMIKO = False
     paramiko = None
+
+PARAMIKO_DEFAULTS = {
+    'server': 'ui4.computing.kiae.ru',
+    'remote_path': '/home/users/aamore/rl_a3c_slurm/',
+    'ssh_key': '~/.ssh/id_rsa',
+}
+RSYNC_DEFAULTS = {
+    'server': 'ki',
+    'remote_path': '/s/ls4/users/aamore/rl_a3c_pytorch/',
+    'ssh_key': '~/.ssh/id_rsa2',
+}
 
 
 DEFAULT_ACTION_PANELS = ['beta2', 'option2', 'action']
@@ -326,18 +340,70 @@ def draw_frames_with_info(values, images, experiment_title, start_idx=0, stop_id
     return results
 
 
-def download_eval_files(eval_folder, local_dir, server, username, remote_project_path, pkey_path="~/.ssh/id_rsa"):
+def _openssh_rsync_rsh(username, pkey_path):
+    """ssh command for rsync -e. Enables ssh-rsa (old KIAE host keys)."""
+    ssh_cmd = [
+        "ssh",
+        "-o", "HostKeyAlgorithms=+ssh-rsa",
+        "-o", "PubkeyAcceptedAlgorithms=+ssh-rsa",
+    ]
+    pkey_path = os.path.expanduser(pkey_path) if pkey_path else ""
+    if pkey_path and os.path.isfile(pkey_path):
+        ssh_cmd.extend(["-i", pkey_path])
+    if username:
+        ssh_cmd.extend(["-l", username])
+    return " ".join(shlex.quote(part) for part in ssh_cmd)
+
+
+def download_eval_files_rsync(eval_folder, local_dir, server, username, remote_project_path, pkey_path):
+    """Download evaluation .npy files via OpenSSH rsync (opt-in with --rsync)."""
+    remote_eval_path = f"{remote_project_path.rstrip('/')}/{eval_folder.strip('/')}"
+    remote_spec = f"{server}:{remote_eval_path}/"
+    local_spec = local_dir.rstrip("/") + "/"
+
+    try:
+        os.makedirs(local_dir, exist_ok=True)
+    except Exception as e:
+        print(f"[download] Error creating local directory: {e}")
+        return False
+
+    rsh = _openssh_rsync_rsh(username, pkey_path)
+    cmd = [
+        "rsync", "-avz", "--progress",
+        "-e", rsh,
+        "--include", "*/",
+        "--include", "*.npy",
+        "--exclude", "*",
+        remote_spec,
+        local_spec,
+    ]
+    print(f"[download] Connecting via OpenSSH rsync to {server} as {username}...")
+    print(f"[download] Remote: {remote_spec}")
+    print(f"[download] Local:  {local_spec}")
+    print(f"[download] Running: {' '.join(shlex.quote(c) for c in cmd)}")
+
+    result = subprocess.run(cmd)
+    if result.returncode != 0:
+        print(f"[download] rsync failed (exit {result.returncode}).")
+        print("[download] If the remote path is wrong, pass --remote-path.")
+        return False
+
+    print("[download] Download complete!")
+    return True
+
+
+def download_eval_files_paramiko(eval_folder, local_dir, server, username, remote_project_path, pkey_path="~/.ssh/id_rsa"):
     """
     Download evaluation files from remote server via SFTP.
     """
     if not HAS_PARAMIKO:
         print("[download] ERROR: paramiko is not installed. Cannot download from remote server.")
         print("[download] Install with: pip install paramiko")
-        print("[download] Or use --no-download to process local files only.")
+        print("[download] Or use --rsync (OpenSSH) / --no-download.")
         return False
-    
+
     print(f"[download] Connecting to {server} as {username}...")
-    
+
     # Load private key
     pkey_path = os.path.expanduser(pkey_path)
     if not os.path.exists(pkey_path):
@@ -349,11 +415,11 @@ def download_eval_files(eval_folder, local_dir, server, username, remote_project
         except Exception as e:
             print(f"[download] Could not load RSA key: {e}, trying default auth...")
             pkey = None
-    
+
     # Connect via SSH
     ssh = paramiko.SSHClient()
     ssh.load_host_keys(os.path.expanduser(os.path.join("~", ".ssh", "known_hosts")))
-    
+
     try:
         if pkey:
             ssh.connect(server, username=username, pkey=pkey,
@@ -365,19 +431,19 @@ def download_eval_files(eval_folder, local_dir, server, username, remote_project
     except Exception as e:
         print(f"[download] SSH connection failed: {e}")
         return False
-    
+
     sftp = ssh.open_sftp()
-    
+
     # List remote files
     remote_eval_path = f"{remote_project_path}/{eval_folder}"
     print(f"[download] Listing files in {remote_eval_path}...")
-    
+
     try:
         all_filenames = sftp.listdir(remote_eval_path)
     except Exception as e:
         print(f"[download] Could not list remote directory: {e}")
         return False
-    
+
     # Files we need to download (matching the old naming convention)
     needed_suffixes = [
         'Q11s.npy', 'Q22s.npy', 'Q21s.npy', 'aas.npy', 'oos.npy',
@@ -386,7 +452,7 @@ def download_eval_files(eval_folder, local_dir, server, username, remote_project
         'Frames_normalized_orig.npy', 'Vs.npy', 'Vs2.npy',
         'rewards.npy', 'gs2.npy', 'gs1.npy', 'ss.npy', 'ss2.npy'
     ]
-    
+
     # Find files to download
     to_download = []
     for filename in all_filenames:
@@ -394,9 +460,9 @@ def download_eval_files(eval_folder, local_dir, server, username, remote_project
             if filename.endswith(suffix):
                 to_download.append(filename)
                 break
-    
+
     print(f"[download] Found {len(to_download)} files to download out of {len(all_filenames)} total files")
-    
+
     # Create local directory
     try:
         os.makedirs(local_dir, exist_ok=True)
@@ -404,27 +470,38 @@ def download_eval_files(eval_folder, local_dir, server, username, remote_project
     except Exception as e:
         print(f"[download] Error creating local directory: {e}")
         return False
-    
+
     # Download files
     for filename in to_download:
         local_path = os.path.join(local_dir, filename)
         remote_path = f"{remote_eval_path}/{filename}"
-        
+
         # Skip if already exists
         if os.path.exists(local_path):
             print(f"[download] Skipping {filename} (already exists)")
             continue
-        
+
         try:
             print(f"[download] Downloading {filename}...")
             sftp.get(remote_path, local_path)
         except Exception as e:
             print(f"[download] Error downloading {filename}: {e}")
-    
+
     sftp.close()
     ssh.close()
     print("[download] Download complete!")
     return True
+
+
+def download_eval_files(eval_folder, local_dir, server, username, remote_project_path, pkey_path, use_rsync=False):
+    """Download eval files: paramiko SFTP by default, OpenSSH rsync if use_rsync."""
+    if use_rsync:
+        return download_eval_files_rsync(
+            eval_folder, local_dir, server, username, remote_project_path, pkey_path
+        )
+    return download_eval_files_paramiko(
+        eval_folder, local_dir, server, username, remote_project_path, pkey_path
+    )
 
 
 def load_eval_data(eval_folder, local_dir):
@@ -810,7 +887,7 @@ def main():
 Example:
     python src/draw_eval_gifs.py Eval_2024-12-04_21:58:10_cosineFix2_try2.468102
     python src/draw_eval_gifs.py Eval_xxx --panels beta2 option2 action --no-download
-    python src/draw_eval_gifs.py Eval_xxx --actions pacman --panels logits1 --no-download
+    python src/draw_eval_gifs.py Eval_xxx --rsync --panels beta2 option2 action
 
 MP4s are saved under Eval_xxx/panels_<p1>_<p2>_.../ so different --panels
 combos do not overwrite each other.
@@ -822,14 +899,16 @@ Available --panels: beta2, option2, action, logits1, logits2,
     parser.add_argument('eval_folder', help='Name of the eval folder on remote server')
     parser.add_argument('--local-dir', default=None,
                        help='Local directory to download files (default: same as eval folder name)')
-    parser.add_argument('--server', default='ui4.computing.kiae.ru',
-                       help='Server SSH name/address')
+    parser.add_argument('--server', default=None,
+                       help='SSH host (paramiko: ui4.computing.kiae.ru; --rsync: ki)')
     parser.add_argument('--username', default='aamore',
                        help='SSH username')
-    parser.add_argument('--remote-path', default='/home/users/aamore/rl_a3c_slurm/',
+    parser.add_argument('--remote-path', default=None,
                        help='Remote project path where eval folders are located')
-    parser.add_argument('--ssh-key', default='~/.ssh/id_rsa',
+    parser.add_argument('--ssh-key', default=None,
                        help='Path to SSH private key')
+    parser.add_argument('--rsync', action='store_true',
+                       help='Download via OpenSSH rsync instead of paramiko (for ssh-rsa hosts)')
     parser.add_argument('--no-download', action='store_true',
                        help='Skip download (use local files if they exist)')
     parser.add_argument('--fps', type=int, default=3,
@@ -884,13 +963,18 @@ Available --panels: beta2, option2, action, logits1, logits2,
     
     # Download files if requested
     if not args.no_download:
+        ssh_defaults = RSYNC_DEFAULTS if args.rsync else PARAMIKO_DEFAULTS
+        server = args.server or ssh_defaults['server']
+        remote_path = args.remote_path or ssh_defaults['remote_path']
+        ssh_key = args.ssh_key or ssh_defaults['ssh_key']
         success = download_eval_files(
             args.eval_folder,
             local_dir,
-            args.server,
+            server,
             args.username,
-            args.remote_path,
-            args.ssh_key
+            remote_path,
+            ssh_key,
+            use_rsync=args.rsync,
         )
         if not success:
             print("[main] Download failed, but will try to use local files if available...")

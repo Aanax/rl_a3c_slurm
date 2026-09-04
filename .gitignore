@@ -18,3 +18,4 @@ __pycache__
 option_sampling_playback.ipynb
 .cursor
 .cursor/
+.venv
