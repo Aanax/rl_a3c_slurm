@@ -159,6 +159,11 @@ def _reset_model_memory(net):
         net.running_mem = torch.zeros((1, 64, 4, 4))
     if hasattr(net, 'prev_x_conv'):
         net.prev_x_conv = None
+    if hasattr(net, 'prev_shared'):
+        net.prev_shared = None
+    if hasattr(net, 'memdiff_sum'):
+        net.memdiff_sum = None
+        net.memdiff_count = 0
 
 
 def run_evaluation(net, env, args):

@@ -1,0 +1,9 @@
+#!/bin/bash
+set -euo pipefail
+
+name_part="oracle_split_shared_diff_concat_memdiff_both_no_oracle_8_64_v2"
+
+/s/ls4/users/dartl0l/goarl/rl_a3c_slurm/slurm_scripts/our/parallel_oracle_runner.sh "$@" \
+  "${name_part}" \
+  /s/ls4/users/dartl0l/goarl/rl_a3c_slurm/configs/run_config_oracle_split_shared_diff_concat_memdiff_both_no_oracle_8_64_v2.ini \
+  > "run_ids_${name_part}.txt"

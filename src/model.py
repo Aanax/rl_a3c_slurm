@@ -767,7 +767,7 @@ class A3CRules2378OracleNoSplitEncoders(nn.Module):
 
     @staticmethod
     def _mode_channels(mode):
-        return 128 if mode == 'concat' else 64
+        return 128 if mode in ('concat', 'concat_memdiff', 'concat_memdiff_raw') else 64
 
     def _init_heads(self):
         for linear in [self.critic_linear, self.actor_linear]:
@@ -889,6 +889,8 @@ class _SharedFeatureDiffMixin:
         'shared' -> current shared features          (64 ch)
         'diff'   -> shared_cur - prev_shared         (64 ch)
         'concat' -> concat([shared, diff])           (128 ch, appearance + motion)
+        'concat_memdiff' -> concat([shared, shared - normalized memory]) (128 ch)
+        'concat_memdiff_raw' -> concat([shared, shared - (1-gamma)*memory]) (128 ch)
     Defaults: actor 'concat', critic 'shared'. Mix in to the LEFT of the base.
 
     Modes are set BEFORE super().__init__() so the base/split can size heads, decoder, and
@@ -899,20 +901,54 @@ class _SharedFeatureDiffMixin:
     boundary so the next batch's first diff doesn't backprop into the freed graph. Declared as a
     class attribute so hasattr(model, 'prev_shared') is True for the reset."""
     prev_shared = None
-    _VALID_MODES = ('shared', 'diff', 'concat')
+    memdiff_sum = None
+    memdiff_count = 0
+    _VALID_MODES = ('shared', 'diff', 'concat', 'concat_memdiff', 'concat_memdiff_raw')
 
     def __init__(self, num_inputs, action_space, args):
         self.actor_input_mode = getattr(args, 'actor_input_mode', 'concat')
         self.critic_input_mode = getattr(args, 'critic_input_mode', 'shared')
+        self.gamma_memory = getattr(args, 'gamma_memory', 0.99)
         assert self.actor_input_mode in self._VALID_MODES, f"bad actor_input_mode: {self.actor_input_mode}"
         assert self.critic_input_mode in self._VALID_MODES, f"bad critic_input_mode: {self.critic_input_mode}"
         super().__init__(num_inputs, action_space, args)
+
+    def _memory_diffs(self, shared):
+        if self.memdiff_sum is None or self.memdiff_count == 0:
+            normalized = raw = torch.zeros_like(shared)
+        else:
+            raw = shared - self.memdiff_sum * (1.0 - self.gamma_memory)
+            if self.gamma_memory == 1.0:
+                normalized = shared - (self.memdiff_sum / self.memdiff_count)
+            else:
+                weight = (1.0 - self.gamma_memory) / (1.0 - self.gamma_memory ** self.memdiff_count)
+                normalized = shared - self.memdiff_sum * weight
+
+        self.memdiff_sum = shared if self.memdiff_sum is None else shared + self.gamma_memory * self.memdiff_sum
+        self.memdiff_count += 1
+        return normalized, raw
 
     def _branch_inputs(self, shared):
         prev = self.prev_shared
         diff = torch.zeros_like(shared) if prev is None else shared - prev
         self.prev_shared = shared
-        pick = {'shared': shared, 'diff': diff, 'concat': torch.cat([shared, diff], dim=1)}
+        memory_modes = (self.actor_input_mode, self.critic_input_mode)
+        normalized_memdiff = raw_memdiff = None
+        if 'concat_memdiff' in memory_modes or 'concat_memdiff_raw' in memory_modes:
+            normalized_memdiff, raw_memdiff = self._memory_diffs(shared)
+        pick = {
+            'shared': shared,
+            'diff': diff,
+            'concat': torch.cat([shared, diff], dim=1),
+            'concat_memdiff': (
+                torch.cat([shared, normalized_memdiff], dim=1)
+                if normalized_memdiff is not None else None
+            ),
+            'concat_memdiff_raw': (
+                torch.cat([shared, raw_memdiff], dim=1)
+                if raw_memdiff is not None else None
+            ),
+        }
         return pick[self.actor_input_mode], pick[self.critic_input_mode]
 
 

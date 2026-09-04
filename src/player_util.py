@@ -102,6 +102,9 @@ class Agent(object):
                 self.model.prev_x_conv = None
             if hasattr(self.model, 'prev_shared'):
                 self.model.prev_shared = None
+            if hasattr(self.model, 'memdiff_sum'):
+                self.model.memdiff_sum = None
+                self.model.memdiff_count = 0
 
         self.eps_len += 1
         self.reward = max(min(self.reward, 1), -1)
@@ -135,6 +138,9 @@ class Agent(object):
                         self.model.prev_x_conv = None
                     if hasattr(self.model, 'prev_shared'):
                         self.model.prev_shared = None
+                    if hasattr(self.model, 'memdiff_sum'):
+                        self.model.memdiff_sum = None
+                        self.model.memdiff_count = 0
                 except:
                     pass
                 

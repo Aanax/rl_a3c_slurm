@@ -367,6 +367,8 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             # here stops the next batch's first diff from backpropagating into this freed graph.
             if getattr(player.model, 'prev_shared', None) is not None:
                 player.model.prev_shared = player.model.prev_shared.detach()
+            if getattr(player.model, 'memdiff_sum', None) is not None:
+                player.model.memdiff_sum = player.model.memdiff_sum.detach()
 
             # Reset memory for models with memory when starting new batch
             if hasattr(player.model, 'reset_memory'):
