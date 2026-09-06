@@ -39,6 +39,18 @@ def compute_level2_loss_v1(args, player, i, R2, entropy_log_prob=None):
     return advantage2, value_loss2_i, delta2, R2
 
 
+def actor_td_weights(use_two_streams, delta, delta2, delta_int=None):
+    """Actor TD weights for one n-step index.
+
+    Internal critic (two-stream): actor1 <- delta + delta_int, actor2 <- delta2.
+    Two-delta: both actors <- delta + delta2. Entropy lives in delta2 via r2.
+    """
+    if use_two_streams:
+        return delta + delta_int, delta2
+    summed = delta + delta2
+    return summed, summed
+
+
 def sampled_action_target(action, logits):
     target = torch.zeros_like(logits)
     return target.scatter(1, action, 1.0)
@@ -215,8 +227,9 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 R2 = torch.zeros(1, 1)
                 R_int = torch.zeros(1, 1)
 
-            use_two_streams = isinstance(
-                player.model, model.Hierarchial_levels
+            use_two_streams = (
+                isinstance(player.model, model.Hierarchial_levels)
+                and getattr(player.model, 'use_internal_critic', False)
             )
 
             model_output = None
@@ -233,7 +246,8 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 if isinstance(model_output, model.HierarchialLevelsOutput):
                     R = model_output.V1.detach()
                     R2 = model_output.V2.detach()
-                    R_int = model_output.V1_int.detach()
+                    if use_two_streams:
+                        R_int = model_output.V1_int.detach()
                     bootstrap_a2_logits = model_output.a2_logits
                 else:
                     R = model_output[0].detach()
@@ -325,6 +339,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
 
                 value_loss2 = value_loss2 + value_loss2_i
 
+                delta_int = None
                 if use_two_streams:
                     # r_int = (1-gamma1) * V2(s'): V2 at end of step i
                     r_int_i = player.values2[i + 1].detach() * (1 - args.gamma)
@@ -332,11 +347,9 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                         R_int, r_int_i, player.values_int[i], args.gamma
                     )
                     value_loss_int = value_loss_int + 0.5 * advantage_int.pow(2)
-                    actor1_delta = delta + delta_int
-                    actor2_delta = delta2
-                else:
-                    actor1_delta = delta + delta2
-                    actor2_delta = actor1_delta
+                actor1_delta, actor2_delta = actor_td_weights(
+                    use_two_streams, delta, delta2, delta_int
+                )
 
                 a1_logits_i = player.a1_logits[i]
                 pred_log_prob1 = F.log_softmax(a1_logits_i, dim=1)

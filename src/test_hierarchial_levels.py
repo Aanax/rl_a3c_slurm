@@ -17,10 +17,16 @@ class FakeSpace(object):
         self.n = n
 
 
-def test_named_output_and_persistence():
-    args = SimpleNamespace(
+def _args(**kwargs):
+    base = dict(
         hidden_size=64, monitor_s=False, use_rmsnorm=False, num_options=4
     )
+    base.update(kwargs)
+    return SimpleNamespace(**base)
+
+
+def test_named_output_and_persistence():
+    args = _args()
     m = model.Hierarchial_levels(2, FakeSpace(6), args)
     x = torch.randn(1, 2, 80, 80)
     out = m(x, None, None)
@@ -42,6 +48,8 @@ def test_named_output_and_persistence():
     assert out[12] is out.terminated2
     assert m.level1.beta is None
     assert m.level1.use_beta is False
+    assert m.level1.critic_int is None
+    assert out.V1_int is None
 
     opt_after = m.level2.current_action.clone()
     m.level2.beta.bias.data.fill_(-50.0)
@@ -60,6 +68,39 @@ def test_upper_options_dim():
     print('test_upper_options_dim passed')
 
 
+def test_internal_critic_head_optional():
+    x = torch.randn(1, 2, 80, 80)
+    m_off = model.Hierarchial_levels(2, FakeSpace(6), _args())
+    assert m_off.use_internal_critic is False
+    assert m_off.level1.critic_int is None
+    out_off = m_off(x, None, None)
+    assert out_off.V1_int is None
+
+    m_on = model.Hierarchial_levels(
+        2, FakeSpace(6), _args(use_internal_critic=True)
+    )
+    assert m_on.use_internal_critic is True
+    assert m_on.level1.critic_int is not None
+    out_on = m_on(x, None, None)
+    assert out_on.V1_int is not None
+    assert out_on.V1_int.shape == (1, 1)
+    print('test_internal_critic_head_optional passed')
+
+
+def test_actor_delta_assignments():
+    from train import actor_td_weights
+    delta = torch.tensor([[1.0]])
+    delta2 = torch.tensor([[2.0]])
+    delta_int = torch.tensor([[0.5]])
+    actor1, actor2 = actor_td_weights(True, delta, delta2, delta_int)
+    assert torch.equal(actor1, delta + delta_int)
+    assert torch.equal(actor2, delta2)
+    actor1, actor2 = actor_td_weights(False, delta, delta2, delta_int)
+    assert torch.equal(actor1, delta + delta2)
+    assert torch.equal(actor2, actor1)
+    print('test_actor_delta_assignments passed')
+
+
 def test_running_return_td():
     from train import running_return_td
     R = torch.tensor([[0.0]])
@@ -75,9 +116,11 @@ def test_running_return_td():
 if __name__ == '__main__':
     test_upper_options_dim()
     test_named_output_and_persistence()
+    test_internal_critic_head_optional()
     # train import may fail without setproctitle; skip gracefully
     try:
         test_running_return_td()
+        test_actor_delta_assignments()
     except ImportError as e:
-        print('skip test_running_return_td:', e)
+        print('skip train-dependent tests:', e)
     print('All smoke tests passed')

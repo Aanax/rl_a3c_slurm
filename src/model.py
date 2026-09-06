@@ -29,7 +29,7 @@ HierarchialLevelsOutput = namedtuple(
         'beta2',         # 10 level-2 termination coeff (active option)
         'terminated1',   # 11 level-1 always resamples; True every step
         'terminated2',   # 12 whether level-2 option terminated this step
-        'V1_int',        # 13 level-1 internal critic (top-down from V2)
+        'V1_int',        # 13 level-1 internal critic, or None if unused
     ],
 )
 
@@ -567,9 +567,10 @@ class Hierarchial_levels(nn.Module):
 
     Level 2: s2 -> pi2 / V2 / beta2 (options; sticky via beta2).
              upper_options_dim=0 (top level, no higher option).
-    Level 1: concat(s1, a2_onehot) -> pi1 / V1 (env) / V1_int (top-down).
-             upper_options_dim=num_options (conditioned on active a2).
-             a1 is resampled every step; level 1 has no beta.
+    Level 1: concat(s1, a2_onehot) -> pi1 / V1 (env) and optional V1_int
+             (top-down, when use_internal_critic). upper_options_dim=num_options
+             (conditioned on active a2). a1 is resampled every step; level 1
+             has no beta.
 
     Returns HierarchialLevelsOutput (namedtuple; see field docs on that type).
     """
@@ -584,6 +585,7 @@ class Hierarchial_levels(nn.Module):
         num_outputs = action_space.n
         self.num_outputs = num_outputs
         self.num_options = getattr(args, 'num_options', 8)
+        self.use_internal_critic = getattr(args, 'use_internal_critic', False)
 
         use_rmsnorm = getattr(args, 'use_rmsnorm', False)
         feat1 = 64 * 4 * 4
@@ -603,7 +605,7 @@ class Hierarchial_levels(nn.Module):
             n_actions=num_outputs,
             upper_options_dim=self.num_options,
             use_beta=False,
-            use_internal_critic=True,
+            use_internal_critic=self.use_internal_critic,
         )
 
         self.train()
