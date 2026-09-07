@@ -13,6 +13,7 @@ from train import (
     level2_choice_weight,
     level2_policy_ce,
     level2_beta_loss,
+    level2_entropy_log_prob,
     sampled_action_target,
 )
 
@@ -117,6 +118,18 @@ def test_switch_gradient_matches_closed_form():
     for beta_val in (0.01, 0.1, 0.5):
         g = beta_grad(beta_val, prev_idx=0, taken_idx=2, advantage=1.0)
         assert abs(g - (-(1.0 - beta_val))) < 1e-3
+
+
+def test_entropy_bonus_is_beta_log_pi():
+    """r2 -= entropy_log_prob adds -β log π(a) for the current option."""
+    logits, _, beta, _, iota, _ = build(0.25, prev_idx=2)
+    log_pi_a = F.log_softmax(logits, dim=1)[:, 2:3]
+    term = level2_entropy_log_prob(log_pi_a, beta, iota)
+    assert torch.allclose(term, 0.25 * log_pi_a)
+    assert not term.requires_grad
+    # Fresh sample is always from π, so no β factor.
+    term_fresh = level2_entropy_log_prob(log_pi_a, beta, iota=None)
+    assert torch.allclose(term_fresh, log_pi_a.detach())
 
 
 if __name__ == '__main__':

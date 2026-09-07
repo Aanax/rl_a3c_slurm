@@ -51,6 +51,19 @@ def actor_td_weights(use_two_streams, delta, delta2, delta_int=None):
     return summed, summed
 
 
+def level2_entropy_log_prob(log_pi_a, beta, iota=None):
+    """Subtract from r2 so the bonus is -β log π(a) for the current option.
+
+    π is only used when the option is (re)sampled, which happens with
+    probability β. A fresh choice (no previous option) always comes from π,
+    so β is treated as 1. Detached: entropy is reward shaping, not a π/β
+    gradient path.
+    """
+    if iota is None:
+        return log_pi_a.detach()
+    return (beta * log_pi_a).detach()
+
+
 def sampled_action_target(action, logits):
     target = torch.zeros_like(logits)
     return target.scatter(1, action, 1.0)
@@ -305,20 +318,12 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                         iota = option2_before_batch
                     pi2 = F.softmax(a2_logits_i, dim=1)
                     pi_wave = level2_pi_wave(pi2, player.betas2[i], iota)
-                    if args.entropy_neg_log_pi:
-                        entropy_log_prob = (
-                            -F.log_softmax(a2_logits_i, dim=1)
-                            .gather(1, player.actions2[i])
-                            .detach()
-                        )
-                    else:
-                        # Bonus on π̃, not π: under π the agent could farm entropy
-                        # by driving β to 0 (always stick) while π stays diffuse.
-                        entropy_log_prob = (
-                            (pi_wave + PI_WAVE_EPS).log()
-                            .gather(1, player.actions2[i])
-                            .detach()
-                        )
+                    log_pi_a = F.log_softmax(a2_logits_i, dim=1).gather(
+                        1, player.actions2[i]
+                    )
+                    entropy_log_prob = level2_entropy_log_prob(
+                        log_pi_a, player.betas2[i], iota
+                    )
                 elif (
                     i < len(player.option_terminated)
                     and player.option_terminated[i]
