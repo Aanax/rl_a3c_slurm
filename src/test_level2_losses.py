@@ -1,4 +1,4 @@
-"""Tests for the split level-2 losses: pi trains via CE, beta via advantage."""
+"""Tests for the split level-2 losses: pi trains via sampled score, beta via advantage."""
 from __future__ import print_function
 import os
 import sys
@@ -9,9 +9,9 @@ import torch
 import torch.nn.functional as F
 
 from train import (
+    PI_WAVE_EPS,
     level2_pi_wave,
-    level2_choice_weight,
-    level2_policy_ce,
+    level2_ext_policy_loss,
     level2_beta_loss,
     level2_entropy_log_prob,
     sampled_action_target,
@@ -44,39 +44,41 @@ def test_pi_wave_is_the_executed_distribution():
     assert torch.allclose(pi_wave[0, 0], 0.25 * pi[0, 0])
 
 
-def test_choice_weight_is_a_probability():
-    for beta_val in (0.001, 0.01, 0.1, 0.5, 0.9, 0.999):
-        for prev_idx in range(3):
-            _, _, beta, pi, iota, pi_wave = build(beta_val, prev_idx)
-            weight = level2_choice_weight(pi, pi_wave, beta, iota)
-            assert weight.min() >= 0.0
-            assert weight.max() <= 1.0 + 1e-5
+def test_ext_policy_loss_is_sampled_score():
+    """Loss uses log π(a), π^ext(a), π̃(a), β — not a sum over the simplex."""
+    logits, _, beta, pi, iota, pi_wave = build(0.1, prev_idx=2)
+    action = torch.tensor([[2]])
+    pi_ext = torch.tensor([[0.1, 0.2, 0.7]])
+    log_pi_a = F.log_softmax(logits, dim=1).gather(1, action)
+    loss = level2_ext_policy_loss(log_pi_a, pi_wave, beta, action, pi_ext)
+    expected = -(
+        pi_ext[0, 2] * beta / (pi_wave[0, 2] + PI_WAVE_EPS)
+    ).detach() * log_pi_a
+    assert torch.allclose(loss, expected)
 
 
-def test_choice_weight_separates_the_two_timescales():
-    """A real option switch counts fully; mere persistence barely counts."""
-    _, _, beta, pi, iota, pi_wave = build(0.1, prev_idx=0)
-    switched = level2_choice_weight(pi, pi_wave, beta, iota)[0, 2]
-    assert torch.allclose(switched, torch.tensor(1.0), atol=1e-4)
-
-    _, _, beta, pi, iota, pi_wave = build(0.1, prev_idx=2)
-    continued = level2_choice_weight(pi, pi_wave, beta, iota)[0, 2]
-    assert continued < 0.1
-
-
-def test_choice_weight_is_one_without_a_previous_option():
-    _, _, beta, pi, iota, pi_wave = build(0.1, prev_idx=None)
-    weight = level2_choice_weight(pi, pi_wave, beta, iota)
-    assert torch.allclose(weight, torch.ones_like(weight))
-
-
-def test_policy_ce_does_not_touch_beta():
+def test_ext_policy_loss_does_not_touch_beta():
     logits, beta_logit, beta, pi, iota, pi_wave = build(0.1, prev_idx=2)
-    weight = level2_choice_weight(pi, pi_wave, beta, iota)
-    target = sampled_action_target(torch.tensor([[2]]), logits)
-    level2_policy_ce(target, pi, weight).backward()
+    action = torch.tensor([[2]])
+    log_pi_a = F.log_softmax(logits, dim=1).gather(1, action)
+    pi_ext = sampled_action_target(action, logits)
+    level2_ext_policy_loss(log_pi_a, pi_wave, beta, action, pi_ext).backward()
     assert logits.grad is not None
     assert beta_logit.grad is None
+
+
+def test_ext_policy_loss_ignores_other_actions():
+    """A one-hot π^ext on a different option must not enter the score."""
+    logits, _, beta, pi, iota, pi_wave = build(0.1, prev_idx=2)
+    action = torch.tensor([[2]])
+    log_pi_a = F.log_softmax(logits, dim=1).gather(1, action)
+    pi_ext_off = sampled_action_target(torch.tensor([[0]]), logits)
+    pi_ext_on = sampled_action_target(action, logits)
+    off = level2_ext_policy_loss(log_pi_a, pi_wave, beta, action, pi_ext_off)
+    on = level2_ext_policy_loss(log_pi_a, pi_wave, beta, action, pi_ext_on)
+    # off-target mass at a is 0, so the coefficient (and the loss) is 0
+    assert torch.allclose(off, torch.zeros_like(off))
+    assert on.abs() > off.abs()
 
 
 def test_beta_loss_does_not_touch_pi():

@@ -84,22 +84,15 @@ def level2_pi_wave(pi, beta, iota):
     return (1.0 - beta) * iota + beta * pi
 
 
-def level2_choice_weight(pi, pi_wave, beta, iota):
-    """β·π/π̃ = P(the option was really (re)sampled here | executed option).
-
-    Importance-sampling correction for training π on options drawn from π̃:
-    steps where the option merely persisted get a near-zero weight, steps
-    where a genuine choice happened get ~1. Always lands in [0, 1], detached
-    so β trains only through its own loss.
+def level2_ext_policy_loss(log_pi_a, pi_wave, beta, action, pi_ext):
+    """ π^ext_★ is the discounted
+    empirical option distribution. β, π̃ and π^ext are taken at a;
+    only log π(a) keeps a gradient, so β still trains through its own loss.
     """
-    if iota is None:
-        return torch.ones_like(pi)
-    return (beta * pi / (pi_wave + PI_WAVE_EPS)).detach()
-
-
-def level2_policy_ce(target, pi, weight):
-    """CE(t, π) with per-option importance weights."""
-    return -(target * weight * (pi + 1e-8).log()).sum(dim=1)
+    pi_ext_a = pi_ext.gather(1, action)
+    pi_wave_a = pi_wave.gather(1, action)
+    coeff = pi_ext_a * beta / (pi_wave_a + PI_WAVE_EPS)
+    return -coeff.detach() * log_pi_a
 
 
 def level2_beta_loss(pi, pi_wave, beta, iota, action, advantage):
@@ -370,11 +363,9 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 ).detach()
 
                 if use_gated_beta:
-                    weight = level2_choice_weight(
-                        pi2, pi_wave, player.betas2[i], iota
-                    )
-                    ce_i = level2_policy_ce(
-                        level2_running_target, pi2, weight
+                    policy2_i = level2_ext_policy_loss(
+                        log_pi_a, pi_wave, player.betas2[i],
+                        player.actions2[i], level2_running_target,
                     )
                     policy_loss = policy_loss + neg_log_prob1_i * actor1_delta
                     if args.entropy_coef > 0:
@@ -382,7 +373,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                             policy_loss
                             - (args.entropy_coef * player.entropies[i])
                         )
-                    policy_loss2 = policy_loss2 + ce_i * actor2_delta
+                    policy_loss2 = policy_loss2 + policy2_i * actor2_delta
                     if iota is not None:
                         beta_loss = beta_loss + level2_beta_loss(
                             pi2, pi_wave, player.betas2[i], iota,
