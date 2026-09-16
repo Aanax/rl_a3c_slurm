@@ -65,6 +65,13 @@ args.actor_input_mode = config.get('DEFAULT', 'actor_input_mode', fallback='conc
 args.critic_input_mode = config.get('DEFAULT', 'critic_input_mode', fallback='shared')
 args.save_model_steps = config.getint('DEFAULT', 'save_model_steps', fallback=0)
 args.train_version = config.get('DEFAULT', 'train_version', fallback='v1')
+args.delta_t_mode = config.get('DEFAULT', 'delta_t_mode', fallback='td')
+args.empirical_distribution_correction = config.getboolean('DEFAULT', 'empirical_distribution_correction', fallback=False)
+args.empirical_distribution_correction_epsilon = config.getfloat('DEFAULT', 'empirical_distribution_correction_epsilon', fallback=0.0)
+if not 0.0 <= args.empirical_distribution_correction_epsilon < float('inf'):
+    raise ValueError('empirical_distribution_correction_epsilon must be finite and nonnegative')
+if args.delta_t_mode not in ('td', 'advantage'):
+    raise ValueError("delta_t_mode must be 'td' or 'advantage'")
 
 # For list types
 gpu_ids_str = config.get('DEFAULT', 'gpu_ids', fallback='-1')

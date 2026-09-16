@@ -17,6 +17,7 @@ import csv
 import os
 
 
+
 def compute_level2_loss_v1(args, player, i, gae2, R2):
     """
     v1: orig algo for level 2 loss.
@@ -69,6 +70,7 @@ def compute_level2_loss_v2(args, player, i, r2, V2Target, gae2):
     gae2 = gae2 * args.gamma2 * args.tau + delta_t2
     
     return advantage2, value_loss2_i, delta_t2, gae2, r2, V2Target
+
 
 
 def train(rank, args, shared_model, optimizer, env_conf, frames_total):
@@ -250,11 +252,14 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 value_loss = value_loss + 0.5 * advantage.pow(2)
 
                 # Generalized Advantage Estimataion 1
-                delta_t = (
-                    player.rewards[i]
-                    + args.gamma * player.values[i + 1].data
-                    - player.values[i].data
-                )
+                if args.delta_t_mode == 'advantage':
+                    delta_t = advantage.detach()
+                else:
+                    delta_t = (
+                        player.rewards[i]
+                        + args.gamma * player.values[i + 1].data
+                        - player.values[i].data
+                    )
 
                 # Intrinsic critic target (oracle reward).
                 if args.w_restoration_loss > 0 and len(player.x_restoreds) > 0:
@@ -277,11 +282,14 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     intrinsic_advantage = R_intrinsic - player.values_intrinsic[i]
                     value_intrinsic_loss = value_intrinsic_loss + 0.5 * intrinsic_advantage.pow(2)
 
-                    delta_t_intrinsic = (
-                        oracle_r
-                        + args.gamma * player.values_intrinsic[i + 1].data
-                        - player.values_intrinsic[i].data
-                    ) * w_intrinsic
+                    if args.delta_t_mode == 'advantage':
+                        delta_t_intrinsic = intrinsic_advantage.detach() * w_intrinsic
+                    else:
+                        delta_t_intrinsic = (
+                            oracle_r
+                            + args.gamma * player.values_intrinsic[i + 1].data
+                            - player.values_intrinsic[i].data
+                        ) * w_intrinsic
 
                     cosine_restoreds = -F.cosine_similarity(
                         player.x_restoreds[i].view(-1),
@@ -320,15 +328,24 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                         value_loss2 = value_loss2 + value_loss2_i
 
                 # For actor1, use sum of delta_t and delta_t2 (if hierarchical)
-                if delta_t2 is not None:
+                if args.delta_t_mode == 'advantage':
+                    if delta_t2 is not None:
+                        raise ValueError('delta_t_mode=advantage does not support hierarchical delta_t2')
+                    gae = delta_t
+                    gae_intrinsic = delta_t_intrinsic
+                elif delta_t2 is not None:
                     gae = gae * args.gamma * args.tau + (delta_t + delta_t2)
                 else:
                     gae = gae * args.gamma * args.tau + delta_t
-                    
-                gae_intrinsic = gae_intrinsic * args.gamma * args.tau + delta_t_intrinsic
+
+                if args.delta_t_mode == 'td':
+                    gae_intrinsic = gae_intrinsic * args.gamma * args.tau + delta_t_intrinsic
+                policy_advantage = gae + gae_intrinsic
+                if args.empirical_distribution_correction:
+                    policy_advantage = policy_advantage / (player.log_probs[i].detach().exp() + args.empirical_distribution_correction_epsilon)
                 policy_loss = (
                     policy_loss
-                    - (player.log_probs[i] * (gae + gae_intrinsic))
+                    - (player.log_probs[i] * policy_advantage)
                     - (args.entropy_coef * player.entropies[i])
                 )
                 
