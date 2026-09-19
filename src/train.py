@@ -204,6 +204,8 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 model_output = player.model(
                     state.unsqueeze(0), player.hx, player.cx
                 )
+                if isinstance(player.model, model._FutureSharedDiffTargetMixin):
+                    player.shared_states.append(model_output[-1].detach())
                 value = model_output[0]
                 R = value.detach()
                 if isinstance(player.model, (model.A3CRules2378OracleIntrinsicCritic, model.A3CRules2378OracleFCIntrinsicCritic, model._IntrinsicCriticMixin)) and len(model_output) >= 6:
@@ -263,9 +265,17 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
 
                 # Intrinsic critic target (oracle reward).
                 if args.w_restoration_loss > 0 and len(player.x_restoreds) > 0:
-                    G_t = G_t * args.gamma_restoration + player.next_states[i] - player.states[i]
+                    if isinstance(player.model, model._FutureSharedDiffTargetMixin):
+                        if len(player.shared_states) != len(player.rewards) + 1:
+                            raise ValueError('shared feature transitions are misaligned')
+                        G_t = (G_t * args.gamma_restoration
+                               + player.shared_states[i + 1] - player.shared_states[i])
+                    else:
+                        G_t = G_t * args.gamma_restoration + player.next_states[i] - player.states[i]
 
-                    if args.relu_g_const:
+                    if getattr(player.model, 'predicts_shared_diff', False):
+                        G_const = G_t.detach().view(-1)
+                    elif args.relu_g_const:
                         G_const = F.relu(G_t.detach().view(-1))
                     else:
                         G_const = G_t.detach().view(-1)

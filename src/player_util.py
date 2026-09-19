@@ -28,6 +28,7 @@ class Agent(object):
         self.kls = []
         self.states = []
         self.next_states = []
+        self.shared_states = []
         self.done = True
         self.info = None
         self.reward = 0
@@ -40,6 +41,11 @@ class Agent(object):
         model_output = self.model(
             current_state, self.hx, self.cx, None
         )
+        if isinstance(self.model, model_module._FutureSharedDiffTargetMixin):
+            shared_t = model_output[-1].detach()
+            model_output = model_output[:-1]
+        else:
+            shared_t = None
         if len(model_output) == 4:
             value, logit, self.hx, self.cx = model_output
             x_restored = None
@@ -94,6 +100,13 @@ class Agent(object):
                 self.state = torch.from_numpy(state).float().cuda()
         else:
             self.state = torch.from_numpy(state).float()
+
+        if shared_t is not None:
+            self.shared_states.append(shared_t)
+            if self.done:
+                self.shared_states.append(
+                    self.model.terminal_next_shared(self.state.unsqueeze(0))
+                )
 
         if self.done:
             if hasattr(self.model, 'running_mem'):
@@ -176,4 +189,5 @@ class Agent(object):
         self.kls = []
         self.next_states = []
         self.states = []
+        self.shared_states = []
         return self

@@ -802,9 +802,12 @@ class A3CRules2378OracleNoSplitEncoders(nn.Module):
     def _encode_critic(self, x):
         return x
 
-    def _extra_outputs(self, actor_flat):
+    def _extra_outputs(self, actor_flat, shared):
         """Base: no extra head. _IntrinsicCriticMixin overrides to append value_intrinsic."""
         return ()
+
+    def _oracle_output(self, actor_feat):
+        return self.decoder(actor_feat)
 
     def _forward_core(self, inputs):
         shared, _, _, _ = self.shared_encoder(inputs)
@@ -820,11 +823,11 @@ class A3CRules2378OracleNoSplitEncoders(nn.Module):
         if self.monitor_s:
             self.s_values.append(shared.detach().cpu())
 
-        x_restored = self.decoder(actor_feat)
-        return actor_flat, critic_flat, x_restored
+        x_restored = self._oracle_output(actor_feat)
+        return actor_flat, critic_flat, x_restored, shared
 
     def forward(self, inputs, hx, cx, mem=None):
-        actor_flat, critic_flat, x_restored = self._forward_core(inputs)
+        actor_flat, critic_flat, x_restored, shared = self._forward_core(inputs)
         hx = torch.Tensor([0])
         cx = torch.Tensor([0])
         return (
@@ -833,7 +836,7 @@ class A3CRules2378OracleNoSplitEncoders(nn.Module):
             hx,
             cx,
             x_restored,
-            *self._extra_outputs(actor_flat),
+            *self._extra_outputs(actor_flat, shared),
         )
 
 
@@ -879,7 +882,7 @@ class _IntrinsicCriticMixin:
         self.critic_linear_intrinsic.bias.data.fill_(0)
         self.critic_linear_intrinsic.weight.data.mul_(1.0)
 
-    def _extra_outputs(self, actor_flat):
+    def _extra_outputs(self, actor_flat, shared):
         return (self.critic_linear_intrinsic(actor_flat),)
 
 
@@ -953,6 +956,27 @@ class _SharedFeatureDiffMixin:
 
 
 # --- Split-encoder variants (classic topology: per-branch conv encoders). Names/configs unchanged. ---
+class _FutureSharedDiffTargetMixin:
+    predicts_shared_diff = True
+
+    def __init__(self, num_inputs, action_space, args):
+        super().__init__(num_inputs, action_space, args)
+        self.shared_future_delta_head = nn.Conv2d(
+            self._actor_branch_channels(), 64, kernel_size=1
+        )
+        self._init_branch_conv(self.shared_future_delta_head)
+    def _oracle_output(self, actor_feat):
+        return self.shared_future_delta_head(actor_feat)
+
+    def _extra_outputs(self, actor_flat, shared):
+        return (*super()._extra_outputs(actor_flat, shared), shared.detach())
+
+    def terminal_next_shared(self, next_batched_input):
+        with torch.no_grad():
+            next_shared, _, _, _ = self.shared_encoder(next_batched_input)
+        return next_shared.view(next_shared.size(0), 64, 4, 4).detach()
+
+
 class A3CRules2378OracleSplitEncoders(_SplitEncodersMixin, A3CRules2378OracleNoSplitEncoders):
     """Oracle split topology: NoSplit base + per-branch conv encoders (actor/oracle, critic)."""
     pass
@@ -984,4 +1008,16 @@ class A3CRules2378OracleNoSplitSharedDiff(_SharedFeatureDiffMixin, A3CRules2378O
 
 class A3CRules2378OracleNoSplitSharedDiffIntrinsicCritic(_SharedFeatureDiffMixin, _IntrinsicCriticMixin, A3CRules2378OracleNoSplitEncoders):
     """No-split SharedDiff variant with an additional intrinsic critic head."""
+    pass
+
+
+class A3CRules2378OracleNoSplitSharedFutureDiff(
+        _FutureSharedDiffTargetMixin, _SharedFeatureDiffMixin,
+        A3CRules2378OracleNoSplitEncoders):
+    pass
+
+
+class A3CRules2378OracleNoSplitSharedFutureDiffIntrinsicCritic(
+        _FutureSharedDiffTargetMixin, _SharedFeatureDiffMixin, _IntrinsicCriticMixin,
+        A3CRules2378OracleNoSplitEncoders):
     pass

@@ -535,6 +535,9 @@ def create_restored_gif(data, eval_folder, local_dir, fps=3, start_idx=0, stop_i
     if x_restoreds is None:
         print("[draw] No x_restoreds found, skipping.")
         return
+    if x_restoreds.shape[1:] != frames.shape[1:]:
+        print("[draw] Oracle output is not image-shaped, skipping.")
+        return
 
     dd = draw_frames_with_restored(
         frames,
