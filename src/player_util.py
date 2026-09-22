@@ -24,6 +24,7 @@ class Agent(object):
         self.rewards = []
         self.entropies = []
         self.entropies2 = []  # Actor2 entropies for hierarchical models
+        self.actions2 = []
         self.x_restoreds = []
         self.kls = []
         self.states = []
@@ -34,6 +35,22 @@ class Agent(object):
         self.reward = 0
         self.gpu_id = -1
         self.hidden_size = args.hidden_size
+
+    def _store_option(self, logit2, action2, value2):
+        """Record the option already sampled inside the model.
+
+        Args:
+            logit2: Option-policy logits.
+            action2: Sampled option index.
+            value2: Level-2 value at this step.
+        """
+        prob2 = F.softmax(logit2, dim=1)
+        log_prob2 = F.log_softmax(logit2, dim=1)
+        entropy2 = -(log_prob2 * prob2).sum(1)
+        self.entropies2.append(entropy2)
+        self.log_probs2.append(log_prob2.gather(1, action2))
+        self.values2.append(value2)
+        self.actions2.append(action2)
 
     def action_train(self):
 
@@ -46,19 +63,27 @@ class Agent(object):
             model_output = model_output[:-1]
         else:
             shared_t = None
-        if len(model_output) == 4:
+        if isinstance(self.model, model_module.A3CRules2378OracleTwoLevel):
+            (
+                value, logit, self.hx, self.cx, x_restored, value_intrinsic,
+                value2, logit2, action2,
+            ) = model_output
+            kl = None
+        elif len(model_output) == 4:
             value, logit, self.hx, self.cx = model_output
             x_restored = None
             kl = None
             value_intrinsic = None
             value2 = None
             logit2 = None
+            action2 = None
         elif len(model_output) == 5:
             value, logit, self.hx, self.cx, x_restored = model_output
             kl = None
             value2 = None
             logit2 = None
             value_intrinsic = None
+            action2 = None
         elif len(model_output) == 6:
             if isinstance(self.model, (model_module.A3CRules2378OracleIntrinsicCritic, model_module.A3CRules2378OracleFCIntrinsicCritic, model_module._IntrinsicCriticMixin)):
                 value, logit, self.hx, self.cx, x_restored, value_intrinsic = model_output
@@ -68,11 +93,13 @@ class Agent(object):
                 value_intrinsic = None
             value2 = None
             logit2 = None
+            action2 = None
         elif len(model_output) == 8:
             # Hierarchical model: V1, a1, hx, cx, None, None, V2, a2
             value, logit, self.hx, self.cx, _, _, value2, logit2 = model_output
             x_restored = None
             kl = None
+            action2 = None
         else:
             raise ValueError(f"Unexpected model output length: {len(model_output)}. Expected 4, 5, 6, or 8.")
         
@@ -83,8 +110,9 @@ class Agent(object):
         action = prob.multinomial(1).data
         log_prob = log_prob.gather(1, action)
         
-        # Handle actor2 if hierarchical model
-        if logit2 is not None:
+        if action2 is not None:
+            self._store_option(logit2, action2, value2)
+        elif logit2 is not None:
             prob2 = F.softmax(logit2, dim=1)
             log_prob2 = F.log_softmax(logit2, dim=1)
             entropy2 = -(log_prob2 * prob2).sum(1)
@@ -185,6 +213,7 @@ class Agent(object):
         self.rewards = []
         self.entropies = []
         self.entropies2 = []
+        self.actions2 = []
         self.x_restoreds = []
         self.kls = []
         self.next_states = []
