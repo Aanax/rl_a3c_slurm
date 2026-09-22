@@ -12,5 +12,5 @@ seq_args=("${@:1:$(($#-2))}")
 
 for i in $(seq "${seq_args[@]}")
 do
-  sbatch -J "${job_name}_${i}" /s/ls4/users/dartl0l/goarl/rl_a3c_slurm/slurm_scripts/our/run_one_run_oracle.sh "$i" "$config_path"
+  sbatch -J "${job_name}_${i}" /s/ls4/users/aamore/rl_a3c_pytorch/slurm_scripts/our/run_one_run_oracle.sh "$i" "$config_path"
 done
