@@ -72,6 +72,81 @@ def compute_level2_loss_v2(args, player, i, r2, V2Target, gae2):
     return advantage2, value_loss2_i, delta_t2, gae2, r2, V2Target
 
 
+def _option_index(option_id):
+    if torch.is_tensor(option_id):
+        return int(option_id.item())
+    return int(option_id)
+
+
+def option_changes_after(option_ids, index):
+    """Whether the option at ``index`` ends before the next stored step.
+
+    Args:
+        option_ids: Option index per rollout step.
+        index: Step being updated in the backward pass.
+
+    Returns:
+        True when the following step belongs to a different option.
+    """
+    next_index = index + 1
+    if next_index >= len(option_ids):
+        return False
+    return _option_index(option_ids[index]) != _option_index(option_ids[next_index])
+
+
+def option_segment_return_step(running_return, reward, gamma, option_ended):
+    """One backward step of an option return.
+
+    Args:
+        running_return: Return accumulated from later steps of this option.
+        reward: Option reward at this step.
+        gamma: Discount applied inside the option.
+        option_ended: True when the next step is a different option.
+
+    Returns:
+        Discounted return at this step.
+    """
+    if option_ended:
+        running_return = torch.zeros_like(running_return)
+    return gamma * running_return + reward
+
+
+def oracle_two_level_actor_loss(
+    log_prob1, advantage_int, entropy1,
+    log_prob2, advantage2, entropy2, entropy_coef,
+):
+    """Actor losses for the oracle two-level model.
+
+    Args:
+        log_prob1: Log-probability of the environment action.
+        advantage_int: Detached internal-critic advantage.
+        entropy1: Entropy of the level-1 policy.
+        log_prob2: Log-probability of the sampled option.
+        advantage2: Detached option advantage.
+        entropy2: Entropy of the option policy.
+        entropy_coef: Coefficient of the entropy bonus.
+
+    Returns:
+        Tuple of level-1 and level-2 actor loss terms for one step.
+    """
+    policy1 = -(log_prob1 * advantage_int) - entropy_coef * entropy1
+    policy2 = -(log_prob2 * advantage2) - entropy_coef * entropy2
+    return policy1, policy2
+
+
+def external_advantage_restoration(cosine_loss, advantage_ext, weight):
+    """Scale the oracle cosine loss by the external advantage.
+
+    Args:
+        cosine_loss: Negative cosine between the decoder output and the target.
+        advantage_ext: Detached external-critic advantage.
+        weight: Restoration loss weight.
+
+    Returns:
+        Weighted restoration term for one step.
+    """
+    return weight * cosine_loss * advantage_ext
+
 
 def train(rank, args, shared_model, optimizer, env_conf, frames_total):
     ptitle(f"Train Agent: {rank}")
@@ -199,6 +274,13 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 gae2 = torch.zeros(1, 1)
                 gae_intrinsic = torch.zeros(1, 1)
             model_output = None
+            w_intrinsic = 0.0
+            if isinstance(player.model, (
+                model.A3CRules2378OracleIntrinsicCritic,
+                model.A3CRules2378OracleFCIntrinsicCritic,
+                model._IntrinsicCriticMixin,
+            )):
+                w_intrinsic = 1.0
             if not player.done:
                 state = player.state
                 model_output = player.model(
@@ -223,6 +305,9 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             # Check if model is hierarchical (has V2 and a2 outputs)
             # If values2 was populated during action_train, model is hierarchical
             is_hierarchical = len(player.values2) > 0
+            use_oracle_two_level = isinstance(
+                player.model, model.A3CRules2378OracleTwoLevel
+            )
             if is_hierarchical:
                 # Append final R2 to match the final R we just appended
                 # If episode is done, R2 remains zeros (bootstrap value)
@@ -306,13 +391,26 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                         G_const,
                         dim=0,
                     )
-                    restoration_loss = restoration_loss + args.w_restoration_loss * cosine_restoreds * delta_t
+                    restoration_loss = restoration_loss + external_advantage_restoration(
+                        cosine_restoreds, delta_t, args.w_restoration_loss
+                    )
                 else:
                     delta_t_intrinsic = 0.0
 
                 # Level 2 loss
                 delta_t2 = None
-                if is_hierarchical and len(player.values2) > i and len(player.log_probs2) > i:
+                advantage2 = None
+                if use_oracle_two_level:
+                    r2_i = player.values[i].detach() * (1.0 - args.gamma)
+                    R2 = option_segment_return_step(
+                        R2,
+                        r2_i,
+                        args.gamma2,
+                        option_changes_after(player.actions2, i),
+                    )
+                    advantage2 = R2 - player.values2[i]
+                    value_loss2 = value_loss2 + 0.5 * advantage2.pow(2)
+                elif is_hierarchical and len(player.values2) > i and len(player.log_probs2) > i:
                     if use_train_v2:
                         (
                             advantage2,
@@ -358,9 +456,26 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     - (player.log_probs[i] * policy_advantage)
                     - (args.entropy_coef * player.entropies[i])
                 )
-                
-                # Actor2 loss (only for hierarchical)
-                if is_hierarchical and len(player.log_probs2) > i:
+                if use_oracle_two_level:
+                    # The lines above added the external advantage. Level-1
+                    # policy uses only the internal advantage; level-2 uses A2.
+                    policy_loss = (
+                        policy_loss
+                        + (player.log_probs[i] * policy_advantage)
+                        + (args.entropy_coef * player.entropies[i])
+                    )
+                    policy1_i, policy2_i = oracle_two_level_actor_loss(
+                        player.log_probs[i],
+                        gae_intrinsic,
+                        player.entropies[i],
+                        player.log_probs2[i],
+                        advantage2.detach(),
+                        player.entropies2[i],
+                        args.entropy_coef,
+                    )
+                    policy_loss = policy_loss + policy1_i
+                    policy_loss2 = policy_loss2 + policy2_i
+                elif is_hierarchical and len(player.log_probs2) > i:
                     policy_loss2 = (
                         policy_loss2
                         - (player.log_probs2[i] * gae2)
@@ -375,12 +490,18 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     if args.w_kld_loss > 0 and len(player.kls) > i:
                         kld_loss += args.w_kld_loss * player.kls[i]
 
-            # Combine critic1 loss with critic2 loss
-            if is_hierarchical:
+            if use_oracle_two_level:
                 value_loss = value_loss + value_loss2
-            
-            # Total loss: actor1 + actor2 + combined critic loss
-            if is_hierarchical:
+                total_loss = (
+                    policy_loss
+                    + policy_loss2
+                    + 0.5 * value_loss
+                    + 0.5 * value_intrinsic_loss
+                    + kld_loss
+                    + restoration_loss
+                )
+            elif is_hierarchical:
+                value_loss = value_loss + value_loss2
                 total_loss = policy_loss + policy_loss2 + 0.5 * value_loss + kld_loss + restoration_loss
             else:
                 total_loss = policy_loss + 0.5 * value_loss + kld_loss + restoration_loss + 0.5 * value_intrinsic_loss * w_intrinsic
