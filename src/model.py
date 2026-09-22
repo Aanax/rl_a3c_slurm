@@ -1021,3 +1021,71 @@ class A3CRules2378OracleNoSplitSharedFutureDiffIntrinsicCritic(
         _FutureSharedDiffTargetMixin, _SharedFeatureDiffMixin, _IntrinsicCriticMixin,
         A3CRules2378OracleNoSplitEncoders):
     pass
+
+
+def _init_level_linear(linear, weight_scale):
+    fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
+    std = 1.0 / math.sqrt(fan_in)
+    nn.init.normal_(linear.weight, mean=0.0, std=std)
+    linear.bias.data.fill_(0)
+    linear.weight.data.mul_(weight_scale)
+
+
+class A3CRules2378OracleTwoLevel(A3CRules2378OracleNoSplitSharedDiffIntrinsicCritic):
+    """Oracle whose level-1 actor and critics are conditioned on an option one-hot.
+
+    Args:
+        num_inputs: Number of observation channels.
+        action_space: Environment action space. Uses ``action_space.n``.
+        args: Run config. Reads ``num_options``.
+    """
+
+    def __init__(self, num_inputs, action_space, args):
+        super(A3CRules2378OracleTwoLevel, self).__init__(
+            num_inputs, action_space, args
+        )
+        self.num_options = getattr(args, 'num_options', 8)
+        actor_dim = self._actor_branch_channels() * 16
+        critic_dim = self._critic_branch_channels() * 16
+        self.actor_linear = nn.Linear(actor_dim + self.num_options, action_space.n)
+        self.critic_linear = nn.Linear(critic_dim + self.num_options, 1)
+        self.critic_linear_intrinsic = nn.Linear(actor_dim + self.num_options, 1)
+        self.actor_linear2 = nn.Linear(critic_dim, self.num_options)
+        self.critic_linear2 = nn.Linear(critic_dim, 1)
+        _init_level_linear(self.actor_linear, 0.01)
+        _init_level_linear(self.critic_linear, 1.0)
+        _init_level_linear(self.critic_linear_intrinsic, 1.0)
+        _init_level_linear(self.actor_linear2, 0.01)
+        _init_level_linear(self.critic_linear2, 1.0)
+
+    def _option_onehot(self, logits2):
+        probs2 = F.softmax(logits2, dim=1)
+        if self.training:
+            option_index = probs2.multinomial(1)
+        else:
+            option_index = probs2.argmax(dim=1, keepdim=True)
+        onehot = torch.zeros_like(probs2)
+        onehot.scatter_(1, option_index, 1.0)
+        return onehot.detach(), option_index
+
+    def forward(self, inputs, hx, cx, mem=None):
+        actor_flat, critic_flat, x_restored, _shared = self._forward_core(inputs)
+        logits2 = self.actor_linear2(critic_flat)
+        value2 = self.critic_linear2(critic_flat)
+        # One-hot is a condition for level-1 heads. The decoder already ran on actor_flat.
+        option_onehot, option_index = self._option_onehot(logits2)
+        actor_in = torch.cat([actor_flat, option_onehot], dim=1)
+        critic_in = torch.cat([critic_flat, option_onehot], dim=1)
+        hx = torch.Tensor([0])
+        cx = torch.Tensor([0])
+        return (
+            self.critic_linear(critic_in),
+            self.actor_linear(actor_in),
+            hx,
+            cx,
+            x_restored,
+            self.critic_linear_intrinsic(actor_in),
+            value2,
+            logits2,
+            option_index,
+        )
