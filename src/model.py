@@ -1058,22 +1058,37 @@ class A3CRules2378OracleTwoLevel(A3CRules2378OracleNoSplitSharedDiffIntrinsicCri
         _init_level_linear(self.actor_linear2, 0.01)
         _init_level_linear(self.critic_linear2, 1.0)
 
-    def _option_onehot(self, logits2):
+    def _option_onehot(self, logits2, option_index=None):
+        """Build the option one-hot.
+
+        Args:
+            logits2: Option-policy logits.
+            option_index: Fixed option index. Sampled from ``logits2`` when omitted.
+
+        Returns:
+            Detached one-hot and the option index.
+        """
         probs2 = F.softmax(logits2, dim=1)
-        if self.training:
-            option_index = probs2.multinomial(1)
+        if option_index is None:
+            if self.training:
+                option_index = probs2.multinomial(1)
+            else:
+                option_index = probs2.argmax(dim=1, keepdim=True)
         else:
-            option_index = probs2.argmax(dim=1, keepdim=True)
+            if not torch.is_tensor(option_index):
+                option_index = torch.tensor(option_index, device=probs2.device)
+            option_index = option_index.to(device=probs2.device, dtype=torch.long)
+            option_index = option_index.reshape(probs2.size(0), 1)
         onehot = torch.zeros_like(probs2)
         onehot.scatter_(1, option_index, 1.0)
         return onehot.detach(), option_index
 
-    def forward(self, inputs, hx, cx, mem=None):
+    def forward(self, inputs, hx, cx, mem=None, option_index=None):
         actor_flat, critic_flat, x_restored, _shared = self._forward_core(inputs)
         logits2 = self.actor_linear2(critic_flat)
         value2 = self.critic_linear2(critic_flat)
         # One-hot is a condition for level-1 heads. The decoder already ran on actor_flat.
-        option_onehot, option_index = self._option_onehot(logits2)
+        option_onehot, option_index = self._option_onehot(logits2, option_index)
         actor_in = torch.cat([actor_flat, option_onehot], dim=1)
         critic_in = torch.cat([critic_flat, option_onehot], dim=1)
         hx = torch.Tensor([0])

@@ -111,6 +111,42 @@ def option_segment_return_step(running_return, reward, gamma, option_ended):
     return gamma * running_return + reward
 
 
+def level1_option_delta(reward, gamma, value, next_value, option_ended):
+    """Temporal-difference residual for one option step.
+
+    Args:
+        reward: Reward at this step.
+        gamma: Discount.
+        value: Value at this step.
+        next_value: Value at the following step.
+        option_ended: True when the following step is a different option.
+
+    Returns:
+        Residual at this step.
+    """
+    if option_ended:
+        next_value = torch.zeros_like(next_value)
+    return reward + gamma * next_value - value
+
+
+def option_truncated_gae(gae, delta, gamma, tau, option_ended):
+    """One backward GAE step cut at an option boundary.
+
+    Args:
+        gae: Advantage accumulated from later steps.
+        delta: Temporal-difference residual at this step.
+        gamma: Discount.
+        tau: GAE trace-decay parameter.
+        option_ended: True when later steps belong to another option.
+
+    Returns:
+        Generalized advantage at this step.
+    """
+    if option_ended:
+        gae = torch.zeros_like(gae)
+    return gae * gamma * tau + delta
+
+
 def oracle_two_level_actor_loss(
     log_prob1, advantage_int, entropy1,
     log_prob2, advantage2, entropy2, entropy_coef,
@@ -283,9 +319,17 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 w_intrinsic = 1.0
             if not player.done:
                 state = player.state
-                model_output = player.model(
-                    state.unsqueeze(0), player.hx, player.cx
-                )
+                if isinstance(player.model, model.A3CRules2378OracleTwoLevel) and player.actions2:
+                    model_output = player.model(
+                        state.unsqueeze(0),
+                        player.hx,
+                        player.cx,
+                        option_index=player.actions2[-1],
+                    )
+                else:
+                    model_output = player.model(
+                        state.unsqueeze(0), player.hx, player.cx
+                    )
                 if isinstance(player.model, model._FutureSharedDiffTargetMixin):
                     player.shared_states.append(model_output[-1].detach())
                 value = model_output[0]
@@ -334,13 +378,30 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             if args.w_restoration_loss > 0 and len(player.x_restoreds) > 0:
                 G_t = player.x_restoreds[-1].clone()
             for i in reversed(range(len(player.rewards))):
-                R = args.gamma * R + player.rewards[i]
+                option_ended = (
+                    use_oracle_two_level
+                    and option_changes_after(player.actions2, i)
+                )
+                if use_oracle_two_level:
+                    R = option_segment_return_step(
+                        R, player.rewards[i], args.gamma, option_ended,
+                    )
+                else:
+                    R = args.gamma * R + player.rewards[i]
                 advantage = R - player.values[i]
                 value_loss = value_loss + 0.5 * advantage.pow(2)
 
                 # Generalized Advantage Estimataion 1
                 if args.delta_t_mode == 'advantage':
                     delta_t = advantage.detach()
+                elif use_oracle_two_level:
+                    delta_t = level1_option_delta(
+                        player.rewards[i],
+                        args.gamma,
+                        player.values[i].data,
+                        player.values[i + 1].data,
+                        option_ended,
+                    )
                 else:
                     delta_t = (
                         player.rewards[i]
@@ -373,12 +434,25 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     cosine_const_values.append(cosine_const.item())
                     oracle_r = (1.0 - args.gamma) * cosine_const
 
-                    R_intrinsic = args.gamma * R_intrinsic + oracle_r
+                    if use_oracle_two_level:
+                        R_intrinsic = option_segment_return_step(
+                            R_intrinsic, oracle_r, args.gamma, option_ended,
+                        )
+                    else:
+                        R_intrinsic = args.gamma * R_intrinsic + oracle_r
                     intrinsic_advantage = R_intrinsic - player.values_intrinsic[i]
                     value_intrinsic_loss = value_intrinsic_loss + 0.5 * intrinsic_advantage.pow(2)
 
                     if args.delta_t_mode == 'advantage':
                         delta_t_intrinsic = intrinsic_advantage.detach() * w_intrinsic
+                    elif use_oracle_two_level:
+                        delta_t_intrinsic = level1_option_delta(
+                            oracle_r,
+                            args.gamma,
+                            player.values_intrinsic[i].data,
+                            player.values_intrinsic[i + 1].data,
+                            option_ended,
+                        ) * w_intrinsic
                     else:
                         delta_t_intrinsic = (
                             oracle_r
@@ -441,13 +515,26 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                         raise ValueError('delta_t_mode=advantage does not support hierarchical delta_t2')
                     gae = delta_t
                     gae_intrinsic = delta_t_intrinsic
+                elif use_oracle_two_level:
+                    gae = option_truncated_gae(
+                        gae, delta_t, args.gamma, args.tau, option_ended,
+                    )
                 elif delta_t2 is not None:
                     gae = gae * args.gamma * args.tau + (delta_t + delta_t2)
                 else:
                     gae = gae * args.gamma * args.tau + delta_t
 
                 if args.delta_t_mode == 'td':
-                    gae_intrinsic = gae_intrinsic * args.gamma * args.tau + delta_t_intrinsic
+                    if use_oracle_two_level:
+                        gae_intrinsic = option_truncated_gae(
+                            gae_intrinsic,
+                            delta_t_intrinsic,
+                            args.gamma,
+                            args.tau,
+                            option_ended,
+                        )
+                    else:
+                        gae_intrinsic = gae_intrinsic * args.gamma * args.tau + delta_t_intrinsic
                 policy_advantage = gae + gae_intrinsic
                 if args.empirical_distribution_correction:
                     policy_advantage = policy_advantage / (player.log_probs[i].detach().exp() + args.empirical_distribution_correction_epsilon)

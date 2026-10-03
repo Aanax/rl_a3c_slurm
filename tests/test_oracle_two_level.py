@@ -17,6 +17,8 @@ def _load_train_helpers():
         "_option_index",
         "option_changes_after",
         "option_segment_return_step",
+        "level1_option_delta",
+        "option_truncated_gae",
         "oracle_two_level_actor_loss",
         "external_advantage_restoration",
     }
@@ -33,6 +35,8 @@ def _load_train_helpers():
 _HELPERS = _load_train_helpers()
 option_changes_after = _HELPERS["option_changes_after"]
 option_segment_return_step = _HELPERS["option_segment_return_step"]
+level1_option_delta = _HELPERS["level1_option_delta"]
+option_truncated_gae = _HELPERS["option_truncated_gae"]
 oracle_two_level_actor_loss = _HELPERS["oracle_two_level_actor_loss"]
 external_advantage_restoration = _HELPERS["external_advantage_restoration"]
 
@@ -171,6 +175,57 @@ class OracleTwoLevelTest(unittest.TestCase):
         advantage_ext = torch.tensor(4.0)
         term = external_advantage_restoration(cosine_loss, advantage_ext, 2.0)
         self.assertAlmostEqual(float(term.item()), -2.0)
+
+    def test_level1_td_delta_drops_the_next_option_value(self):
+        ended = level1_option_delta(
+            torch.tensor(1.0), 0.5, torch.tensor(0.25), torch.tensor(8.0), True,
+        )
+        continued = level1_option_delta(
+            torch.tensor(1.0), 0.5, torch.tensor(0.25), torch.tensor(8.0), False,
+        )
+        self.assertAlmostEqual(float(ended.item()), 1.0 - 0.25)
+        self.assertAlmostEqual(float(continued.item()), 1.0 + 0.5 * 8.0 - 0.25)
+
+    def test_gae_drops_advantage_carried_from_the_next_option(self):
+        ended = option_truncated_gae(
+            torch.tensor(5.0), torch.tensor(1.0), 0.5, 1.0, True,
+        )
+        continued = option_truncated_gae(
+            torch.tensor(5.0), torch.tensor(1.0), 0.5, 1.0, False,
+        )
+        self.assertAlmostEqual(float(ended.item()), 1.0)
+        self.assertAlmostEqual(float(continued.item()), 0.5 * 5.0 + 1.0)
+
+    def test_bootstrap_option_index_conditions_level1_critics(self):
+        num_options = 4
+        net = model.A3CRules2378OracleTwoLevel(1, SimpleNamespace(n=3), _args(num_options))
+        net.train()
+        net.actor_linear2.weight.data.zero_()
+        net.actor_linear2.bias.data.zero_()
+        net.actor_linear2.bias.data[0] = 10.0
+        for head in (net.critic_linear, net.critic_linear_intrinsic):
+            head.weight.data.zero_()
+            head.bias.data.zero_()
+            head.weight.data[0, -num_options:] = torch.arange(
+                num_options, dtype=head.weight.dtype,
+            )
+        observation = torch.zeros(1, 1, 80, 80)
+
+        value, _, _, _, _, value_intrinsic, _, _, option_index = net(
+            observation, None, None, option_index=torch.tensor([[2]]),
+        )
+
+        self.assertEqual(int(option_index.item()), 2)
+        self.assertAlmostEqual(float(value.item()), 2.0)
+        self.assertAlmostEqual(float(value_intrinsic.item()), 2.0)
+
+    def test_train_cuts_level1_critic_at_option_end(self):
+        source = (Path(__file__).resolve().parents[1] / "src" / "train.py").read_text()
+        self.assertIn("R, player.rewards[i], args.gamma, option_ended", source)
+        self.assertIn("R_intrinsic, oracle_r, args.gamma, option_ended", source)
+        self.assertIn("option_index=player.actions2[-1]", source)
+        self.assertIn("level1_option_delta(", source)
+        self.assertIn("option_truncated_gae(", source)
 
 
 if __name__ == "__main__":
