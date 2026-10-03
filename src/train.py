@@ -111,6 +111,20 @@ def option_segment_return_step(running_return, reward, gamma, option_ended):
     return gamma * running_return + reward
 
 
+def level2_batch_return_step(running_return, reward, gamma):
+    """One backward step of the level-2 return across the batch.
+
+    Args:
+        running_return: Return accumulated from later steps.
+        reward: Level-2 reward at this step.
+        gamma: Level-2 discount.
+
+    Returns:
+        Discounted return at this step.
+    """
+    return gamma * running_return + reward
+
+
 def level1_option_delta(reward, gamma, value, next_value, option_ended):
     """Temporal-difference residual for one option step.
 
@@ -512,12 +526,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 advantage2 = None
                 if use_oracle_two_level:
                     r2_i = player.values[i].detach() * (1.0 - args.gamma)
-                    R2 = option_segment_return_step(
-                        R2,
-                        r2_i,
-                        args.gamma2,
-                        option_changes_after(player.actions2, i),
-                    )
+                    R2 = level2_batch_return_step(R2, r2_i, args.gamma2)
                     advantage2 = R2 - player.values2[i]
                     value_loss2 = value_loss2 + 0.5 * advantage2.pow(2)
                 elif is_hierarchical and len(player.values2) > i and len(player.log_probs2) > i:

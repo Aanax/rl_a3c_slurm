@@ -17,6 +17,7 @@ def _load_train_helpers():
         "_option_index",
         "option_changes_after",
         "option_segment_return_step",
+        "level2_batch_return_step",
         "level1_option_delta",
         "option_truncated_gae",
         "oracle_option_target",
@@ -36,6 +37,7 @@ def _load_train_helpers():
 _HELPERS = _load_train_helpers()
 option_changes_after = _HELPERS["option_changes_after"]
 option_segment_return_step = _HELPERS["option_segment_return_step"]
+level2_batch_return_step = _HELPERS["level2_batch_return_step"]
 level1_option_delta = _HELPERS["level1_option_delta"]
 option_truncated_gae = _HELPERS["option_truncated_gae"]
 oracle_option_target = _HELPERS["oracle_option_target"]
@@ -220,6 +222,21 @@ class OracleTwoLevelTest(unittest.TestCase):
         self.assertEqual(int(option_index.item()), 2)
         self.assertAlmostEqual(float(value.item()), 2.0)
         self.assertAlmostEqual(float(value_intrinsic.item()), 2.0)
+
+    def test_level2_return_crosses_option_boundaries(self):
+        gamma = 0.5
+        rewards = [torch.tensor([[1.0]]), torch.tensor([[2.0]]), torch.tensor([[3.0]])]
+        running = torch.tensor([[10.0]])
+        for reward in reversed(rewards):
+            running = level2_batch_return_step(running, reward, gamma)
+        self.assertAlmostEqual(
+            float(running.item()),
+            1.0 + gamma * 2.0 + gamma ** 2 * 3.0 + gamma ** 3 * 10.0,
+        )
+
+    def test_train_level2_return_runs_through_the_batch(self):
+        source = (Path(__file__).resolve().parents[1] / "src" / "train.py").read_text()
+        self.assertIn("R2 = level2_batch_return_step(R2, r2_i, args.gamma2)", source)
 
     def test_oracle_target_is_zero_at_option_end(self):
         gamma = 0.5
