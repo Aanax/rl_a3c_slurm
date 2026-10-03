@@ -77,17 +77,15 @@ class OracleTwoLevelTest(unittest.TestCase):
         net = model.A3CRules2378OracleTwoLevel(1, SimpleNamespace(n=3), _args(num_options))
         parameter_names = [name for name, _parameter in net.named_parameters()]
         self.assertFalse(any("beta" in name for name in parameter_names))
-        self.assertEqual(
-            net.actor_linear.in_features,
-            net.actor_linear2.in_features + num_options,
-        )
-        self.assertEqual(
-            net.critic_linear.in_features,
-            net.critic_linear2.in_features + num_options,
-        )
+        self.assertEqual(net.level2_encoder.conv1.in_channels, 64)
+        self.assertEqual(net.level2_encoder.conv1.out_channels, 32)
+        self.assertEqual(net.actor_linear2.in_features, 32 * 4 * 4)
+        self.assertEqual(net.critic_linear2.in_features, 32 * 4 * 4)
+        self.assertEqual(net.actor_linear.in_features, 64 * 4 * 4 + num_options)
+        self.assertEqual(net.critic_linear.in_features, 64 * 4 * 4 + num_options)
         self.assertEqual(
             net.critic_linear_intrinsic.in_features,
-            net.actor_linear2.in_features + num_options,
+            64 * 4 * 4 + num_options,
         )
 
         net.eval()
@@ -284,7 +282,8 @@ class OracleTwoLevelTest(unittest.TestCase):
         self.assertEqual(tuple(first[4].shape), (1, 64, 4, 4))
         self.assertEqual(tuple(first[-3].shape), (1, 64, 4, 4))
         self.assertEqual(tuple(first[-2].shape), tuple(first[-1].shape))
-        self.assertEqual(tuple(first[-1].shape), (1, 64, 4, 4))
+        self.assertEqual(tuple(first[-1].shape), (1, 32, 4, 4))
+        self.assertEqual(net.oracle2_head.in_channels, 32)
         self.assertEqual(int(first[8].item()), 0)
         self.assertEqual(int(second[8].item()), 3)
         self.assertEqual(tuple(first[-4].shape), (1, 1))
@@ -308,8 +307,8 @@ class OracleTwoLevelTest(unittest.TestCase):
         )
         concat_out = concat_net(observation, None, None, option_index=1)
         self.assertEqual(tuple(concat_out[4].shape), (1, 64, 4, 4))
-        self.assertEqual(tuple(concat_out[-1].shape), (1, 128, 4, 4))
-        self.assertEqual(tuple(concat_out[-2].shape), (1, 128, 4, 4))
+        self.assertEqual(tuple(concat_out[-1].shape), (1, 32, 4, 4))
+        self.assertEqual(tuple(concat_out[-2].shape), (1, 32, 4, 4))
 
     def test_oracle_gradients_reach_the_shared_encoder(self):
         net = model.A3CRules2378OracleTwoLevel(
@@ -326,6 +325,7 @@ class OracleTwoLevelTest(unittest.TestCase):
         net.zero_grad()
         if net.prev_shared is not None:
             net.prev_shared = net.prev_shared.detach()
+        net.level2_encoder.conv1.bias.data.fill_(0.1)
         pred_s2 = net(observation, None, None, option_index=0)[-1]
         pred_s2.sum().backward()
         self.assertIsNotNone(net.shared_encoder.conv1.weight.grad)

@@ -216,8 +216,6 @@ class EncoderRules234_2(nn.Module):
         # s1 dim 1024 at input? non flat!!! 64*4*4
         
         x = F.relu(self.conv1(x))
-
-        print(f"Final output shape: {x.shape}")
         return x, None, None, None
 
 class EncoderRules234_2_mem(nn.Module):
@@ -814,6 +812,7 @@ class A3CRules2378OracleNoSplitEncoders(nn.Module):
         shared = shared.view(shared.size(0), 64, 4, 4)
 
         actor_in, critic_in = self._branch_inputs(shared)
+
         actor_feat = self._encode_actor(actor_in)
         critic_feat = self._encode_critic(critic_in)
 
@@ -823,7 +822,7 @@ class A3CRules2378OracleNoSplitEncoders(nn.Module):
         if self.monitor_s:
             self.s_values.append(shared.detach().cpu())
 
-        x_restored = self._oracle_output(actor_feat)
+        x_restored = self._oracle_output(shared)
         return actor_flat, critic_flat, x_restored, shared
 
     def forward(self, inputs, hx, cx, mem=None):
@@ -1052,16 +1051,19 @@ class A3CRules2378OracleTwoLevel(A3CRules2378OracleNoSplitSharedDiffIntrinsicCri
         critic_channels = self._critic_branch_channels()
         actor_dim = actor_channels * 16
         critic_dim = critic_channels * 16
+        s2_channels = 32
+        s2_dim = s2_channels * 4 * 4
+        self.level2_encoder = EncoderRules234_2()
         self.oracle1_head = nn.Conv2d(actor_channels, 64, kernel_size=1)
-        self.oracle2_head = nn.Conv2d(critic_channels, critic_channels, kernel_size=1)
+        self.oracle2_head = nn.Conv2d(s2_channels, s2_channels, kernel_size=1)
         self._init_branch_conv(self.oracle1_head)
         self._init_branch_conv(self.oracle2_head)
         self.actor_linear = nn.Linear(actor_dim + self.num_options, action_space.n)
         self.critic_linear = nn.Linear(critic_dim + self.num_options, 1)
         self.critic_linear_intrinsic = nn.Linear(actor_dim + self.num_options, 1)
-        self.actor_linear2 = nn.Linear(critic_dim, self.num_options)
-        self.critic_linear2 = nn.Linear(critic_dim, 1)
-        self.critic_linear_intrinsic2 = nn.Linear(critic_dim, 1)
+        self.actor_linear2 = nn.Linear(s2_dim, self.num_options)
+        self.critic_linear2 = nn.Linear(s2_dim, 1)
+        self.critic_linear_intrinsic2 = nn.Linear(s2_dim, 1)
         _init_level_linear(self.actor_linear, 0.01)
         _init_level_linear(self.critic_linear, 1.0)
         _init_level_linear(self.critic_linear_intrinsic, 1.0)
@@ -1105,25 +1107,14 @@ class A3CRules2378OracleTwoLevel(A3CRules2378OracleNoSplitSharedDiffIntrinsicCri
         """
         return self.oracle1_head(actor_feat)
 
-    def _spatial_map(self, flat, channels):
-        """Restore a 4x4 feature map from a flattened branch.
-
-        Args:
-            flat: Flattened branch features.
-            channels: Channel count of that branch.
-
-        Returns:
-            Feature map of shape ``[batch, channels, 4, 4]``.
-        """
-        return flat.view(flat.size(0), channels, 4, 4)
-
     def forward(self, inputs, hx, cx, mem=None, option_index=None):
         actor_flat, critic_flat, pred_s1, shared = self._forward_core(inputs)
-        s2 = self._spatial_map(critic_flat, self._critic_branch_channels())
+        s2, _, _, _ = self.level2_encoder(shared)
+        s2_flat = s2.reshape(s2.size(0), -1)
         pred_s2 = self.oracle2_head(s2)
-        logits2 = self.actor_linear2(critic_flat)
-        value2 = self.critic_linear2(critic_flat)
-        value_intrinsic2 = self.critic_linear_intrinsic2(critic_flat)
+        logits2 = self.actor_linear2(s2_flat)
+        value2 = self.critic_linear2(s2_flat)
+        value_intrinsic2 = self.critic_linear_intrinsic2(s2_flat)
         # Level-1 heads see the option. Both oracles already ran without it.
         option_onehot, option_index = self._option_onehot(logits2, option_index)
         actor_in = torch.cat([actor_flat, option_onehot], dim=1)
