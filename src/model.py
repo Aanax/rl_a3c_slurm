@@ -1032,7 +1032,7 @@ def _init_level_linear(linear, weight_scale):
 
 
 class A3CRules2378OracleTwoLevel(A3CRules2378OracleNoSplitSharedDiffIntrinsicCritic):
-    """Oracle whose level-1 actor and critics are conditioned on an option one-hot.
+    """Two-level oracle conditioned on an option one-hot.
 
     Args:
         num_inputs: Number of observation channels.
@@ -1040,13 +1040,22 @@ class A3CRules2378OracleTwoLevel(A3CRules2378OracleNoSplitSharedDiffIntrinsicCri
         args: Run config. Reads ``num_options``.
     """
 
+    predicts_shared_diff = True
+
     def __init__(self, num_inputs, action_space, args):
         super(A3CRules2378OracleTwoLevel, self).__init__(
             num_inputs, action_space, args
         )
+        del self.decoder
         self.num_options = getattr(args, 'num_options', 8)
-        actor_dim = self._actor_branch_channels() * 16
-        critic_dim = self._critic_branch_channels() * 16
+        actor_channels = self._actor_branch_channels()
+        critic_channels = self._critic_branch_channels()
+        actor_dim = actor_channels * 16
+        critic_dim = critic_channels * 16
+        self.oracle1_head = nn.Conv2d(actor_channels, 64, kernel_size=1)
+        self.oracle2_head = nn.Conv2d(critic_channels, critic_channels, kernel_size=1)
+        self._init_branch_conv(self.oracle1_head)
+        self._init_branch_conv(self.oracle2_head)
         self.actor_linear = nn.Linear(actor_dim + self.num_options, action_space.n)
         self.critic_linear = nn.Linear(critic_dim + self.num_options, 1)
         self.critic_linear_intrinsic = nn.Linear(actor_dim + self.num_options, 1)
@@ -1083,11 +1092,36 @@ class A3CRules2378OracleTwoLevel(A3CRules2378OracleNoSplitSharedDiffIntrinsicCri
         onehot.scatter_(1, option_index, 1.0)
         return onehot.detach(), option_index
 
+    def _oracle_output(self, actor_feat):
+        """Predict the shared-encoder map.
+
+        Args:
+            actor_feat: Actor-branch feature map.
+
+        Returns:
+            Predicted ``s1`` map.
+        """
+        return self.oracle1_head(actor_feat)
+
+    def _spatial_map(self, flat, channels):
+        """Restore a 4x4 feature map from a flattened branch.
+
+        Args:
+            flat: Flattened branch features.
+            channels: Channel count of that branch.
+
+        Returns:
+            Feature map of shape ``[batch, channels, 4, 4]``.
+        """
+        return flat.view(flat.size(0), channels, 4, 4)
+
     def forward(self, inputs, hx, cx, mem=None, option_index=None):
-        actor_flat, critic_flat, x_restored, _shared = self._forward_core(inputs)
+        actor_flat, critic_flat, pred_s1, shared = self._forward_core(inputs)
+        s2 = self._spatial_map(critic_flat, self._critic_branch_channels())
+        pred_s2 = self.oracle2_head(s2)
         logits2 = self.actor_linear2(critic_flat)
         value2 = self.critic_linear2(critic_flat)
-        # One-hot is a condition for level-1 heads. The decoder already ran on actor_flat.
+        # Level-1 heads see the option. Both oracles already ran without it.
         option_onehot, option_index = self._option_onehot(logits2, option_index)
         actor_in = torch.cat([actor_flat, option_onehot], dim=1)
         critic_in = torch.cat([critic_flat, option_onehot], dim=1)
@@ -1098,9 +1132,12 @@ class A3CRules2378OracleTwoLevel(A3CRules2378OracleNoSplitSharedDiffIntrinsicCri
             self.actor_linear(actor_in),
             hx,
             cx,
-            x_restored,
+            pred_s1,
             self.critic_linear_intrinsic(actor_in),
             value2,
             logits2,
             option_index,
+            shared.detach(),
+            s2.detach(),
+            pred_s2,
         )

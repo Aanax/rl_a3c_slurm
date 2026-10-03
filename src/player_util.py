@@ -26,6 +26,9 @@ class Agent(object):
         self.entropies2 = []  # Actor2 entropies for hierarchical models
         self.actions2 = []
         self.x_restoreds = []
+        self.oracle2_preds = []
+        self.s1_states = []
+        self.s2_states = []
         self.kls = []
         self.states = []
         self.next_states = []
@@ -52,6 +55,21 @@ class Agent(object):
         self.values2.append(value2)
         self.actions2.append(action2)
 
+    def _store_hidden_transition(self, s1, s2, pred_s2):
+        """Record hidden states and the level-2 oracle prediction.
+
+        Args:
+            s1: Detached shared-encoder map at this step.
+            s2: Detached level-2 feature map at this step.
+            pred_s2: Level-2 oracle prediction at this step.
+        """
+        self.s1_states.append(s1)
+        self.s2_states.append(s2)
+        self.oracle2_preds.append(pred_s2)
+        if self.done:
+            self.s1_states.append(torch.zeros_like(s1))
+            self.s2_states.append(torch.zeros_like(s2))
+
     def action_train(self):
 
         current_state = self.state.unsqueeze(0)
@@ -63,11 +81,15 @@ class Agent(object):
             model_output = model_output[:-1]
         else:
             shared_t = None
+        pred_s2 = None
         if isinstance(self.model, model_module.A3CRules2378OracleTwoLevel):
+            s1_t = model_output[-3]
+            s2_t = model_output[-2]
+            pred_s2 = model_output[-1]
             (
                 value, logit, self.hx, self.cx, x_restored, value_intrinsic,
                 value2, logit2, action2,
-            ) = model_output
+            ) = model_output[:-3]
             kl = None
         elif len(model_output) == 4:
             value, logit, self.hx, self.cx = model_output
@@ -157,6 +179,8 @@ class Agent(object):
         self.next_states.append(self.state.unsqueeze(0))
         if x_restored is not None:
             self.x_restoreds.append(x_restored)
+        if pred_s2 is not None:
+            self._store_hidden_transition(s1_t, s2_t, pred_s2)
         if kl is not None:
             self.kls.append(kl)
         return self
@@ -215,6 +239,9 @@ class Agent(object):
         self.entropies2 = []
         self.actions2 = []
         self.x_restoreds = []
+        self.oracle2_preds = []
+        self.s1_states = []
+        self.s2_states = []
         self.kls = []
         self.next_states = []
         self.states = []

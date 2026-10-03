@@ -109,8 +109,8 @@ class OracleTwoLevelTest(unittest.TestCase):
             option0 = forward_option(0)
             option2 = forward_option(2)
 
-        self.assertEqual(int(option0[-1].item()), 0)
-        self.assertEqual(int(option2[-1].item()), 2)
+        self.assertEqual(int(option0[8].item()), 0)
+        self.assertEqual(int(option2[8].item()), 2)
         self.assertAlmostEqual(float(option0[0].item()), 0.0)
         self.assertAlmostEqual(float(option2[0].item()), 2.0)
         self.assertTrue(torch.equal(option0[4], option2[4]))
@@ -215,13 +215,13 @@ class OracleTwoLevelTest(unittest.TestCase):
             )
         observation = torch.zeros(1, 1, 80, 80)
 
-        value, _, _, _, _, value_intrinsic, _, _, option_index = net(
+        output = net(
             observation, None, None, option_index=torch.tensor([[2]]),
         )
 
-        self.assertEqual(int(option_index.item()), 2)
-        self.assertAlmostEqual(float(value.item()), 2.0)
-        self.assertAlmostEqual(float(value_intrinsic.item()), 2.0)
+        self.assertEqual(int(output[8].item()), 2)
+        self.assertAlmostEqual(float(output[0].item()), 2.0)
+        self.assertAlmostEqual(float(output[5].item()), 2.0)
 
     def test_level2_return_crosses_option_boundaries(self):
         gamma = 0.5
@@ -269,6 +269,70 @@ class OracleTwoLevelTest(unittest.TestCase):
         self.assertIn("oracle_bootstrap = model_output[4].detach()", source)
         self.assertIn("oracle_option_target(", source)
         self.assertIn("player.done and i + 1 == len(player.rewards)", source)
+
+    def test_hidden_state_oracles_match_s1_and_s2(self):
+        net = model.A3CRules2378OracleTwoLevel(
+            1, SimpleNamespace(n=3), _args(4),
+        )
+        self.assertTrue(net.predicts_shared_diff)
+        self.assertFalse(any(
+            name.startswith("decoder") for name, _parameter in net.named_parameters()
+        ))
+        observation = torch.ones(1, 1, 80, 80)
+        first = net(observation, None, None, option_index=0)
+        second = net(observation, None, None, option_index=3)
+        self.assertEqual(tuple(first[4].shape), (1, 64, 4, 4))
+        self.assertEqual(tuple(first[-3].shape), (1, 64, 4, 4))
+        self.assertEqual(tuple(first[-2].shape), tuple(first[-1].shape))
+        self.assertEqual(tuple(first[-1].shape), (1, 64, 4, 4))
+        self.assertEqual(int(first[8].item()), 0)
+        self.assertEqual(int(second[8].item()), 3)
+        self.assertTrue(torch.equal(first[4], second[4]))
+        self.assertTrue(torch.equal(first[-1], second[-1]))
+        self.assertFalse(first[-3].requires_grad)
+        self.assertFalse(first[-2].requires_grad)
+        self.assertTrue(first[4].requires_grad)
+        self.assertTrue(first[-1].requires_grad)
+
+        concat_args = _args(4)
+        concat_args.actor_input_mode = "concat"
+        concat_args.critic_input_mode = "concat"
+        concat_net = model.A3CRules2378OracleTwoLevel(
+            1, SimpleNamespace(n=3), concat_args,
+        )
+        concat_out = concat_net(observation, None, None, option_index=1)
+        self.assertEqual(tuple(concat_out[4].shape), (1, 64, 4, 4))
+        self.assertEqual(tuple(concat_out[-1].shape), (1, 128, 4, 4))
+        self.assertEqual(tuple(concat_out[-2].shape), (1, 128, 4, 4))
+
+    def test_oracle_gradients_reach_the_shared_encoder(self):
+        net = model.A3CRules2378OracleTwoLevel(
+            1, SimpleNamespace(n=3), _args(4),
+        )
+        for module in net.shared_encoder.modules():
+            if isinstance(module, torch.nn.Conv2d) and module.bias is not None:
+                module.bias.data.fill_(0.1)
+        observation = torch.ones(1, 1, 80, 80)
+        pred_s1 = net(observation, None, None, option_index=0)[4]
+        pred_s1.sum().backward()
+        self.assertIsNotNone(net.shared_encoder.conv1.weight.grad)
+        self.assertTrue(torch.any(net.shared_encoder.conv1.weight.grad != 0))
+        net.zero_grad()
+        if net.prev_shared is not None:
+            net.prev_shared = net.prev_shared.detach()
+        pred_s2 = net(observation, None, None, option_index=0)[-1]
+        pred_s2.sum().backward()
+        self.assertIsNotNone(net.shared_encoder.conv1.weight.grad)
+        self.assertTrue(torch.any(net.shared_encoder.conv1.weight.grad != 0))
+
+    def test_train_oracle_targets_use_hidden_states(self):
+        source = (Path(__file__).resolve().parents[1] / "src" / "train.py").read_text()
+        self.assertIn("player.s1_states[i + 1] - player.s1_states[i]", source)
+        self.assertIn("player.s2_states[i + 1] - player.s2_states[i]", source)
+        self.assertIn(
+            "cosine2, advantage2.detach(), args.w_restoration_loss",
+            source,
+        )
 
     def test_train_cuts_level1_critic_at_option_end(self):
         source = (Path(__file__).resolve().parents[1] / "src" / "train.py").read_text()

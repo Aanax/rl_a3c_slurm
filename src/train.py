@@ -342,6 +342,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 gae_intrinsic = torch.zeros(1, 1)
             model_output = None
             oracle_bootstrap = None
+            oracle2_bootstrap = None
             w_intrinsic = 0.0
             if isinstance(player.model, (
                 model.A3CRules2378OracleIntrinsicCritic,
@@ -378,6 +379,9 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     R2 = value2.detach()
                 if isinstance(player.model, model.A3CRules2378OracleTwoLevel):
                     oracle_bootstrap = model_output[4].detach()
+                    oracle2_bootstrap = model_output[-1].detach()
+                    player.s1_states.append(model_output[-3])
+                    player.s2_states.append(model_output[-2])
             player.values.append(R)
             player.values_intrinsic.append(R_intrinsic)
             # Check if model is hierarchical (has V2 and a2 outputs)
@@ -417,6 +421,20 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                         G_t = oracle_bootstrap
                 else:
                     G_t = player.x_restoreds[-1].clone()
+            if use_oracle_two_level and len(player.rewards) > 0:
+                if len(player.s1_states) != len(player.rewards) + 1:
+                    raise ValueError('s1 transitions are misaligned')
+                if len(player.s2_states) != len(player.rewards) + 1:
+                    raise ValueError('s2 transitions are misaligned')
+            if (
+                use_oracle_two_level
+                and args.w_restoration_loss > 0
+                and len(player.oracle2_preds) > 0
+            ):
+                if oracle2_bootstrap is None:
+                    G2 = torch.zeros_like(player.oracle2_preds[-1])
+                else:
+                    G2 = oracle2_bootstrap
             for i in reversed(range(len(player.rewards))):
                 option_ended = (
                     use_oracle_two_level
@@ -457,7 +475,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                         )
                         G_t = oracle_option_target(
                             G_t,
-                            player.next_states[i] - player.states[i],
+                            player.s1_states[i + 1] - player.s1_states[i],
                             args.gamma,
                             target_ended,
                         )
@@ -529,6 +547,22 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     R2 = level2_batch_return_step(R2, r2_i, args.gamma2)
                     advantage2 = R2 - player.values2[i]
                     value_loss2 = value_loss2 + 0.5 * advantage2.pow(2)
+                    if args.w_restoration_loss > 0 and len(player.oracle2_preds) > i:
+                        batch_ended = player.done and i + 1 == len(player.rewards)
+                        G2 = oracle_option_target(
+                            G2,
+                            player.s2_states[i + 1] - player.s2_states[i],
+                            args.gamma2,
+                            batch_ended,
+                        )
+                        cosine2 = -F.cosine_similarity(
+                            player.oracle2_preds[i].view(-1),
+                            G2.detach().view(-1),
+                            dim=0,
+                        )
+                        restoration_loss = restoration_loss + external_advantage_restoration(
+                            cosine2, advantage2.detach(), args.w_restoration_loss,
+                        )
                 elif is_hierarchical and len(player.values2) > i and len(player.log_probs2) > i:
                     if use_train_v2:
                         (
