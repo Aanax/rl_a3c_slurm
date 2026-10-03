@@ -1061,11 +1061,13 @@ class A3CRules2378OracleTwoLevel(A3CRules2378OracleNoSplitSharedDiffIntrinsicCri
         self.critic_linear_intrinsic = nn.Linear(actor_dim + self.num_options, 1)
         self.actor_linear2 = nn.Linear(critic_dim, self.num_options)
         self.critic_linear2 = nn.Linear(critic_dim, 1)
+        self.critic_linear_intrinsic2 = nn.Linear(critic_dim, 1)
         _init_level_linear(self.actor_linear, 0.01)
         _init_level_linear(self.critic_linear, 1.0)
         _init_level_linear(self.critic_linear_intrinsic, 1.0)
         _init_level_linear(self.actor_linear2, 0.01)
         _init_level_linear(self.critic_linear2, 1.0)
+        _init_level_linear(self.critic_linear_intrinsic2, 1.0)
 
     def _option_onehot(self, logits2, option_index=None):
         """Build the option one-hot.
@@ -1121,6 +1123,7 @@ class A3CRules2378OracleTwoLevel(A3CRules2378OracleNoSplitSharedDiffIntrinsicCri
         pred_s2 = self.oracle2_head(s2)
         logits2 = self.actor_linear2(critic_flat)
         value2 = self.critic_linear2(critic_flat)
+        value_intrinsic2 = self.critic_linear_intrinsic2(critic_flat)
         # Level-1 heads see the option. Both oracles already ran without it.
         option_onehot, option_index = self._option_onehot(logits2, option_index)
         actor_in = torch.cat([actor_flat, option_onehot], dim=1)
@@ -1137,6 +1140,7 @@ class A3CRules2378OracleTwoLevel(A3CRules2378OracleNoSplitSharedDiffIntrinsicCri
             value2,
             logits2,
             option_index,
+            value_intrinsic2,
             shared.detach(),
             s2.detach(),
             pred_s2,

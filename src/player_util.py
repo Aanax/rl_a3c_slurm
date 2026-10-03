@@ -19,6 +19,7 @@ class Agent(object):
         self.values = []
         self.values2 = []  # V2 values for hierarchical models
         self.values_intrinsic = []
+        self.values_intrinsic2 = []
         self.log_probs = []
         self.log_probs2 = []  # Actor2 log probs for hierarchical models
         self.rewards = []
@@ -83,13 +84,14 @@ class Agent(object):
             shared_t = None
         pred_s2 = None
         if isinstance(self.model, model_module.A3CRules2378OracleTwoLevel):
+            value_intrinsic2 = model_output[-4]
             s1_t = model_output[-3]
             s2_t = model_output[-2]
             pred_s2 = model_output[-1]
             (
                 value, logit, self.hx, self.cx, x_restored, value_intrinsic,
                 value2, logit2, action2,
-            ) = model_output[:-3]
+            ) = model_output[:-4]
             kl = None
         elif len(model_output) == 4:
             value, logit, self.hx, self.cx = model_output
@@ -181,6 +183,7 @@ class Agent(object):
             self.x_restoreds.append(x_restored)
         if pred_s2 is not None:
             self._store_hidden_transition(s1_t, s2_t, pred_s2)
+            self.values_intrinsic2.append(value_intrinsic2)
         if kl is not None:
             self.kls.append(kl)
         return self
@@ -232,6 +235,7 @@ class Agent(object):
         self.values = []
         self.values2 = []
         self.values_intrinsic = []
+        self.values_intrinsic2 = []
         self.log_probs = []
         self.log_probs2 = []
         self.rewards = []

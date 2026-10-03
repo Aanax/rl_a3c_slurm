@@ -331,6 +331,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     R_intrinsic = torch.zeros(1, 1).cuda()
                     gae = torch.zeros(1, 1).cuda()
                     R2 = torch.zeros(1, 1).cuda()
+                    R_intrinsic2 = torch.zeros(1, 1).cuda()
                     gae2 = torch.zeros(1, 1).cuda()
                     gae_intrinsic = torch.zeros(1, 1).cuda()
             else:
@@ -338,6 +339,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 R_intrinsic = torch.zeros(1, 1)
                 gae = torch.zeros(1, 1)
                 R2 = torch.zeros(1, 1)
+                R_intrinsic2 = torch.zeros(1, 1)
                 gae2 = torch.zeros(1, 1)
                 gae_intrinsic = torch.zeros(1, 1)
             model_output = None
@@ -382,6 +384,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     oracle2_bootstrap = model_output[-1].detach()
                     player.s1_states.append(model_output[-3])
                     player.s2_states.append(model_output[-2])
+                    R_intrinsic2 = model_output[-4].detach()
             player.values.append(R)
             player.values_intrinsic.append(R_intrinsic)
             # Check if model is hierarchical (has V2 and a2 outputs)
@@ -394,9 +397,12 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 # Append final R2 to match the final R we just appended
                 # If episode is done, R2 remains zeros (bootstrap value)
                 player.values2.append(R2)
+            if use_oracle_two_level:
+                player.values_intrinsic2.append(R_intrinsic2)
             policy_loss = 0
             value_loss = 0
             value_intrinsic_loss = 0
+            value_intrinsic2_loss = 0
             restoration_loss = 0
             policy_loss2 = 0
             value_loss2 = 0
@@ -547,6 +553,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     R2 = level2_batch_return_step(R2, r2_i, args.gamma2)
                     advantage2 = R2 - player.values2[i]
                     value_loss2 = value_loss2 + 0.5 * advantage2.pow(2)
+                    advantage_intrinsic2 = torch.zeros_like(advantage2)
                     if args.w_restoration_loss > 0 and len(player.oracle2_preds) > i:
                         batch_ended = player.done and i + 1 == len(player.rewards)
                         G2 = oracle_option_target(
@@ -562,6 +569,19 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                         )
                         restoration_loss = restoration_loss + external_advantage_restoration(
                             cosine2, advantage2.detach(), args.w_restoration_loss,
+                        )
+                        cosine_const2 = F.cosine_similarity(
+                            player.oracle2_preds[i].detach().view(-1),
+                            G2.detach().view(-1),
+                            dim=0,
+                        ).squeeze(0)
+                        oracle_r2 = (1.0 - args.gamma2) * cosine_const2
+                        R_intrinsic2 = level2_batch_return_step(
+                            R_intrinsic2, oracle_r2, args.gamma2,
+                        )
+                        advantage_intrinsic2 = R_intrinsic2 - player.values_intrinsic2[i]
+                        value_intrinsic2_loss = (
+                            value_intrinsic2_loss + 0.5 * advantage_intrinsic2.pow(2)
                         )
                 elif is_hierarchical and len(player.values2) > i and len(player.log_probs2) > i:
                     if use_train_v2:
@@ -623,8 +643,8 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     - (args.entropy_coef * player.entropies[i])
                 )
                 if use_oracle_two_level:
-                    # The lines above added the external advantage. Level-1
-                    # policy uses only the internal advantage; level-2 uses A2.
+                    # Level-1 policy uses the internal advantage. Level-2 uses
+                    # the option advantage plus the level-2 internal advantage.
                     policy_loss = (
                         policy_loss
                         + (player.log_probs[i] * policy_advantage)
@@ -635,7 +655,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                         gae_intrinsic,
                         player.entropies[i],
                         player.log_probs2[i],
-                        advantage2.detach(),
+                        (advantage2 + advantage_intrinsic2).detach(),
                         player.entropies2[i],
                         args.entropy_coef,
                     )
@@ -658,6 +678,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
 
             if use_oracle_two_level:
                 value_loss = value_loss + value_loss2
+                value_intrinsic_loss = value_intrinsic_loss + value_intrinsic2_loss
                 total_loss = (
                     policy_loss
                     + policy_loss2
