@@ -147,6 +147,23 @@ def option_truncated_gae(gae, delta, gamma, tau, option_ended):
     return gae * gamma * tau + delta
 
 
+def oracle_option_target(future_target, delta, gamma, option_ended):
+    """Discounted state-change target inside one option.
+
+    Args:
+        future_target: Target accumulated after this step.
+        delta: State change at this step.
+        gamma: Discount shared with the level-1 critic.
+        option_ended: True when this step ends the option.
+
+    Returns:
+        Zero tensor when the option ends, otherwise gamma times the future target plus delta.
+    """
+    if option_ended:
+        return torch.zeros_like(delta)
+    return gamma * future_target.detach() + delta
+
+
 def oracle_two_level_actor_loss(
     log_prob1, advantage_int, entropy1,
     log_prob2, advantage2, entropy2, entropy_coef,
@@ -310,6 +327,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 gae2 = torch.zeros(1, 1)
                 gae_intrinsic = torch.zeros(1, 1)
             model_output = None
+            oracle_bootstrap = None
             w_intrinsic = 0.0
             if isinstance(player.model, (
                 model.A3CRules2378OracleIntrinsicCritic,
@@ -344,6 +362,8 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 if len(model_output) >= 8:
                     value2 = model_output[6]
                     R2 = value2.detach()
+                if isinstance(player.model, model.A3CRules2378OracleTwoLevel):
+                    oracle_bootstrap = model_output[4].detach()
             player.values.append(R)
             player.values_intrinsic.append(R_intrinsic)
             # Check if model is hierarchical (has V2 and a2 outputs)
@@ -376,7 +396,13 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 V2Target = player.values2[-1].detach()
 
             if args.w_restoration_loss > 0 and len(player.x_restoreds) > 0:
-                G_t = player.x_restoreds[-1].clone()
+                if use_oracle_two_level:
+                    if oracle_bootstrap is None:
+                        G_t = torch.zeros_like(player.x_restoreds[-1])
+                    else:
+                        G_t = oracle_bootstrap
+                else:
+                    G_t = player.x_restoreds[-1].clone()
             for i in reversed(range(len(player.rewards))):
                 option_ended = (
                     use_oracle_two_level
@@ -411,7 +437,17 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
 
                 # Intrinsic critic target (oracle reward).
                 if args.w_restoration_loss > 0 and len(player.x_restoreds) > 0:
-                    if isinstance(player.model, model._FutureSharedDiffTargetMixin):
+                    if use_oracle_two_level:
+                        target_ended = option_ended or (
+                            player.done and i + 1 == len(player.rewards)
+                        )
+                        G_t = oracle_option_target(
+                            G_t,
+                            player.next_states[i] - player.states[i],
+                            args.gamma,
+                            target_ended,
+                        )
+                    elif isinstance(player.model, model._FutureSharedDiffTargetMixin):
                         if len(player.shared_states) != len(player.rewards) + 1:
                             raise ValueError('shared feature transitions are misaligned')
                         G_t = (G_t * args.gamma_restoration

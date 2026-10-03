@@ -19,6 +19,7 @@ def _load_train_helpers():
         "option_segment_return_step",
         "level1_option_delta",
         "option_truncated_gae",
+        "oracle_option_target",
         "oracle_two_level_actor_loss",
         "external_advantage_restoration",
     }
@@ -37,6 +38,7 @@ option_changes_after = _HELPERS["option_changes_after"]
 option_segment_return_step = _HELPERS["option_segment_return_step"]
 level1_option_delta = _HELPERS["level1_option_delta"]
 option_truncated_gae = _HELPERS["option_truncated_gae"]
+oracle_option_target = _HELPERS["oracle_option_target"]
 oracle_two_level_actor_loss = _HELPERS["oracle_two_level_actor_loss"]
 external_advantage_restoration = _HELPERS["external_advantage_restoration"]
 
@@ -218,6 +220,38 @@ class OracleTwoLevelTest(unittest.TestCase):
         self.assertEqual(int(option_index.item()), 2)
         self.assertAlmostEqual(float(value.item()), 2.0)
         self.assertAlmostEqual(float(value_intrinsic.item()), 2.0)
+
+    def test_oracle_target_is_zero_at_option_end(self):
+        gamma = 0.5
+        deltas = [torch.tensor([1.0]), torch.tensor([2.0]), torch.tensor([3.0])]
+        option_ids = [0, 0, 1]
+        running = torch.tensor([10.0])
+        targets = [None] * len(deltas)
+        for index in reversed(range(len(deltas))):
+            running = oracle_option_target(
+                running,
+                deltas[index],
+                gamma,
+                option_changes_after(option_ids, index),
+            )
+            targets[index] = running.clone()
+
+        self.assertTrue(torch.equal(targets[2], torch.tensor([gamma * 10.0 + 3.0])))
+        self.assertTrue(torch.equal(targets[1], torch.zeros(1)))
+        self.assertTrue(torch.equal(targets[0], deltas[0]))
+
+    def test_oracle_target_keeps_a_vector_shape_when_the_option_ends(self):
+        ended = oracle_option_target(
+            torch.ones(1, 2, 2), torch.full((1, 2, 2), 3.0), 0.75, True,
+        )
+        self.assertTrue(torch.equal(ended, torch.zeros(1, 2, 2)))
+        self.assertFalse(ended.requires_grad)
+
+    def test_train_cuts_oracle_target_at_option_end(self):
+        source = (Path(__file__).resolve().parents[1] / "src" / "train.py").read_text()
+        self.assertIn("oracle_bootstrap = model_output[4].detach()", source)
+        self.assertIn("oracle_option_target(", source)
+        self.assertIn("player.done and i + 1 == len(player.rewards)", source)
 
     def test_train_cuts_level1_critic_at_option_end(self):
         source = (Path(__file__).resolve().parents[1] / "src" / "train.py").read_text()
