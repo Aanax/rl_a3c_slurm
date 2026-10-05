@@ -189,7 +189,7 @@ def oracle_two_level_actor_loss(
         advantage_int: Detached internal-critic advantage.
         entropy1: Entropy of the level-1 policy.
         log_prob2: Log-probability of the sampled option.
-        advantage2: Detached option advantage.
+        advantage2: Detached advantage of the level-2 policy.
         entropy2: Entropy of the option policy.
         entropy_coef: Coefficient of the entropy bonus.
 
@@ -473,6 +473,12 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                         - player.values[i].data
                     )
 
+                if use_oracle_two_level:
+                    r2_i = player.values[i].detach() * (1.0 - args.gamma)
+                    R2 = level2_batch_return_step(R2, r2_i, args.gamma2)
+                    advantage2 = R2 - player.values2[i]
+                    value_loss2 = value_loss2 + 0.5 * advantage2.pow(2)
+
                 # Intrinsic critic target (oracle reward).
                 if args.w_restoration_loss > 0 and len(player.x_restoreds) > 0:
                     if use_oracle_two_level:
@@ -539,20 +545,20 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                         G_const,
                         dim=0,
                     )
+                    oracle1_advantage = delta_t
+                    if use_oracle_two_level:
+                        oracle1_advantage = delta_t + advantage2.detach()
                     restoration_loss = restoration_loss + external_advantage_restoration(
-                        cosine_restoreds, delta_t, args.w_restoration_loss
+                        cosine_restoreds, oracle1_advantage, args.w_restoration_loss
                     )
                 else:
                     delta_t_intrinsic = 0.0
 
                 # Level 2 loss
                 delta_t2 = None
-                advantage2 = None
+                if not use_oracle_two_level:
+                    advantage2 = None
                 if use_oracle_two_level:
-                    r2_i = player.values[i].detach() * (1.0 - args.gamma)
-                    R2 = level2_batch_return_step(R2, r2_i, args.gamma2)
-                    advantage2 = R2 - player.values2[i]
-                    value_loss2 = value_loss2 + 0.5 * advantage2.pow(2)
                     advantage_intrinsic2 = torch.zeros_like(advantage2)
                     if args.w_restoration_loss > 0 and len(player.oracle2_preds) > i:
                         batch_ended = player.done and i + 1 == len(player.rewards)
@@ -644,7 +650,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 )
                 if use_oracle_two_level:
                     # Level-1 policy uses the internal advantage. Level-2 uses
-                    # the option advantage plus the level-2 internal advantage.
+                    # only the level-2 internal advantage.
                     policy_loss = (
                         policy_loss
                         + (player.log_probs[i] * policy_advantage)
@@ -655,7 +661,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                         gae_intrinsic,
                         player.entropies[i],
                         player.log_probs2[i],
-                        (advantage2 + advantage_intrinsic2).detach(),
+                        advantage_intrinsic2.detach(),
                         player.entropies2[i],
                         args.entropy_coef,
                     )

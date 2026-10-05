@@ -331,9 +331,11 @@ class OracleTwoLevelTest(unittest.TestCase):
         self.assertIsNotNone(net.shared_encoder.conv1.weight.grad)
         self.assertTrue(torch.any(net.shared_encoder.conv1.weight.grad != 0))
 
-    def test_train_level2_actor_uses_both_advantages(self):
+    def test_train_level2_actor_uses_internal_advantage(self):
         source = (Path(__file__).resolve().parents[1] / "src" / "train.py").read_text()
-        self.assertIn("(advantage2 + advantage_intrinsic2).detach()", source)
+        self.assertIn("advantage_intrinsic2.detach()", source)
+        self.assertNotIn("(advantage2 + advantage_intrinsic2).detach()", source)
+        self.assertIn("delta_t + advantage2.detach()", source)
         self.assertIn("R_intrinsic2, oracle_r2, args.gamma2", source)
         self.assertIn("(1.0 - args.gamma2) * cosine_const2", source)
 
