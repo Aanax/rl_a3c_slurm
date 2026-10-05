@@ -21,8 +21,9 @@ Usage (cluster - outputs to logs/ folder):
 Output format (saved as .npy files):
     Frames_normalized_orig.npy - Preprocessed frames (N, C, H, W)
     Q11s.npy - Level 1 logits (N, num_actions)
-    Q22s.npy - Level 2 logits (N, 16) 
+    Q22s.npy - Level 2 logits (N, num_options)
     aas.npy - Selected actions (N, 1)
+    oos.npy - Option index played at each step (N, 1), two-level models
     rewards.npy - Rewards (N,)
     Vs.npy - Level 1 values (N, 1)
     Vs2.npy - Level 2 values (N, 1)
@@ -97,10 +98,14 @@ def parse_args():
     args.max_episode_length = cli.max_episode_length
     args.input_normalization_class = cfg.get('DEFAULT', 'input_normalization_class', fallback='NormalizedEnv')
     args.model_type = cfg.get('DEFAULT', 'model_type', fallback='Hierarchial')
+    args.experiment_name = cfg.get('DEFAULT', 'experiment_name', fallback='eval')
+    args.num_options = cfg.getint('DEFAULT', 'num_options', fallback=8)
+    args.actor_input_mode = cfg.get('DEFAULT', 'actor_input_mode', fallback='shared')
+    args.critic_input_mode = cfg.get('DEFAULT', 'critic_input_mode', fallback='shared')
     args.env_config = cfg.get('DEFAULT', 'env_config', fallback='configs/envs_config.json')
     args.normalization_alpha = cfg.getfloat('DEFAULT', 'normalization_alpha', fallback=0.9999)
     args.monitor_s = False
-    args.use_rmsnorm = False
+    args.use_rmsnorm = cfg.getboolean('DEFAULT', 'use_rmsnorm', fallback=False)
     
     gpu_str = cfg.get('DEFAULT', 'gpu_ids', fallback='-1')
     cfg_gpu_ids = [int(x.strip()) for x in gpu_str.split(',') if x.strip()]
@@ -199,6 +204,7 @@ def run_evaluation(net, env, args):
         Q11s = []  # Level 1 logits
         Q22s = []  # Level 2 logits
         aas = []  # Actions taken
+        oos = []  # Option index played
         rewards = []  # Rewards received
         Vs = []  # Level 1 values
         Vs2 = []  # Level 2 values
@@ -225,7 +231,12 @@ def run_evaluation(net, env, args):
             V2 = None
             a2_logits = None
             x_restored = None
-            if isinstance(net, oracle_types):
+            option_index = None
+            if isinstance(net, model_module.A3CRules2378OracleTwoLevel):
+                V2 = model_output[6]
+                a2_logits = model_output[7]
+                option_index = model_output[8]
+            elif isinstance(net, oracle_types):
                 x_restored = model_output[4]
             else:
                 # Default: treat non-oracle models as hierarchical-style outputs.
@@ -244,6 +255,8 @@ def run_evaluation(net, env, args):
             if a2_logits is not None:
                 Q22s.append(a2_logits.cpu().numpy()[0])  
             aas.append([action])  # Action taken
+            if option_index is not None:
+                oos.append([int(option_index.detach().view(-1)[0].item())])
             Vs.append(V1.cpu().numpy()[0])  # Level 1 value
 # Level 2 logits (16-dim)
             if V2 is not None:
@@ -278,6 +291,8 @@ def run_evaluation(net, env, args):
             'rewards': np.array(rewards),
             'Vs': np.array(Vs),
         }
+        if len(oos) > 0:
+            episode_data['oos'] = np.array(oos)
         if len(Q22s) > 0:
             episode_data['Q22s'] = np.array(Q22s)
         if len(Vs2) > 0:

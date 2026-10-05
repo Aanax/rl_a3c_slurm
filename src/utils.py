@@ -1,8 +1,11 @@
 from __future__ import division
-import numpy as np
-import torch
+import glob
 import json
 import logging
+import os
+
+import numpy as np
+import torch
 
 
 def setup_logger(logger_name, log_file, level=logging.INFO):
@@ -22,6 +25,72 @@ def read_config(file_path):
     """Read JSON config."""
     json_object = json.load(open(file_path, 'r'))
     return json_object
+
+
+def model_checkpoint_dir(args):
+    """Directory of best/latest weights for this run.
+
+    Args:
+        args: Run config. Uses ``log_dir``, ``experiment_name``, ``parallel_id``.
+
+    Returns:
+        Path ``{log_dir}/{experiment_name}/models/p{parallel_id}``.
+    """
+    return os.path.join(args.log_dir, args.experiment_name, "models", f"p{args.parallel_id}")
+
+
+def format_score(score):
+    """Format a score for a checkpoint filename.
+
+    Args:
+        score: Episode return.
+
+    Returns:
+        Integer text, or a float with ``.`` replaced by ``p``.
+    """
+    if score == int(score):
+        return str(int(score))
+    return f"{score:.2f}".replace('.', 'p')
+
+
+def checkpoint_filename(kind, steps, score=None):
+    """Build a checkpoint filename.
+
+    Args:
+        kind: ``latest`` or ``best``.
+        steps: Environment steps at save time.
+        score: Episode return. Omitted from the name when missing.
+
+    Returns:
+        Filename ending in ``.dat``.
+    """
+    if score is not None:
+        return f"{kind}_steps{steps}_score{format_score(score)}.dat"
+    return f"{kind}_steps{steps}.dat"
+
+
+def save_checkpoint(state_dict, args, kind, steps, score=None, replace_previous=True):
+    """Save weights and drop the previous file of the same kind.
+
+    Args:
+        state_dict: Model ``state_dict``.
+        args: Run config. Passed to ``model_checkpoint_dir``.
+        kind: ``latest`` or ``best``.
+        steps: Environment steps at save time.
+        score: Episode return stored in the filename.
+        replace_previous: Delete older ``{kind}_*.dat`` in the same directory.
+
+    Returns:
+        Path of the written file.
+    """
+    save_dir = model_checkpoint_dir(args)
+    os.makedirs(save_dir, exist_ok=True)
+    if replace_previous:
+        for path in glob.glob(os.path.join(save_dir, f"{kind}_*.dat")):
+            os.remove(path)
+    path = os.path.join(save_dir, checkpoint_filename(kind, steps, score))
+    torch.save(state_dict, path)
+    return path
 
 
 def norm_col_init(weights, std=1.0):
