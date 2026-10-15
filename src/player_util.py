@@ -30,6 +30,9 @@ class Agent(object):
         self.oracle2_preds = []
         self.s1_states = []
         self.s2_states = []
+        self.option_end_values = []
+        self.option_end_intrinsic = []
+        self.option_end_oracle = []
         self.kls = []
         self.states = []
         self.next_states = []
@@ -71,9 +74,50 @@ class Agent(object):
             self.s1_states.append(torch.zeros_like(s1))
             self.s2_states.append(torch.zeros_like(s2))
 
+    def _as_option_id(self, option_id):
+        """Read one option index out of a tensor or a plain number.
+
+        Args:
+            option_id: Option index stored on the player or returned by the model.
+
+        Returns:
+            Python int option index.
+        """
+        if torch.is_tensor(option_id):
+            return int(option_id.view(-1)[0].item())
+        return int(option_id)
+
+    def _remember_finished_option(self, state, finished_option):
+        """Store the level-1 bootstrap of an option that just ended.
+
+        Args:
+            state: Observation at the boundary, shape ``[1, ...]``.
+            finished_option: Option index that ended before the current step.
+        """
+        saved_prev = self.model.prev_shared
+        saved_sum = getattr(self.model, 'memdiff_sum', None)
+        saved_count = getattr(self.model, 'memdiff_count', 0)
+        with torch.no_grad():
+            output = self.model(
+                state, self.hx, self.cx, option_index=finished_option,
+            )
+        self.model.prev_shared = saved_prev
+        if hasattr(self.model, 'memdiff_sum'):
+            self.model.memdiff_sum = saved_sum
+            self.model.memdiff_count = saved_count
+        self.option_end_values[-1] = output[0].detach()
+        self.option_end_intrinsic[-1] = output[5].detach()
+        self.option_end_oracle[-1] = output[4].detach()
+
     def action_train(self):
 
         current_state = self.state.unsqueeze(0)
+        finished_option = None
+        if (
+            isinstance(self.model, model_module.A3CRules2378OracleTwoLevel)
+            and self.actions2
+        ):
+            finished_option = self.actions2[-1]
         model_output = self.model(
             current_state, self.hx, self.cx, None
         )
@@ -135,6 +179,11 @@ class Agent(object):
         log_prob = log_prob.gather(1, action)
         
         if action2 is not None:
+            if (
+                finished_option is not None
+                and self._as_option_id(action2) != self._as_option_id(finished_option)
+            ):
+                self._remember_finished_option(current_state, finished_option)
             self._store_option(logit2, action2, value2)
         elif logit2 is not None:
             prob2 = F.softmax(logit2, dim=1)
@@ -184,6 +233,9 @@ class Agent(object):
         if pred_s2 is not None:
             self._store_hidden_transition(s1_t, s2_t, pred_s2)
             self.values_intrinsic2.append(value_intrinsic2)
+            self.option_end_values.append(None)
+            self.option_end_intrinsic.append(None)
+            self.option_end_oracle.append(None)
         if kl is not None:
             self.kls.append(kl)
         return self
@@ -246,6 +298,9 @@ class Agent(object):
         self.oracle2_preds = []
         self.s1_states = []
         self.s2_states = []
+        self.option_end_values = []
+        self.option_end_intrinsic = []
+        self.option_end_oracle = []
         self.kls = []
         self.next_states = []
         self.states = []

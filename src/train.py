@@ -94,7 +94,9 @@ def option_changes_after(option_ids, index):
     return _option_index(option_ids[index]) != _option_index(option_ids[next_index])
 
 
-def option_segment_return_step(running_return, reward, gamma, option_ended):
+def option_segment_return_step(
+    running_return, reward, gamma, option_ended, bootstrap=None,
+):
     """One backward step of an option return.
 
     Args:
@@ -102,12 +104,16 @@ def option_segment_return_step(running_return, reward, gamma, option_ended):
         reward: Option reward at this step.
         gamma: Discount applied inside the option.
         option_ended: True when the next step is a different option.
+        bootstrap: Value of the option that just ended. Zero tail when omitted.
 
     Returns:
         Discounted return at this step.
     """
     if option_ended:
-        running_return = torch.zeros_like(running_return)
+        if bootstrap is None:
+            running_return = torch.zeros_like(running_return)
+        else:
+            running_return = bootstrap.detach()
     return gamma * running_return + reward
 
 
@@ -125,7 +131,9 @@ def level2_batch_return_step(running_return, reward, gamma):
     return gamma * running_return + reward
 
 
-def level1_option_delta(reward, gamma, value, next_value, option_ended):
+def level1_option_delta(
+    reward, gamma, value, next_value, option_ended, bootstrap=None,
+):
     """Temporal-difference residual for one option step.
 
     Args:
@@ -134,12 +142,16 @@ def level1_option_delta(reward, gamma, value, next_value, option_ended):
         value: Value at this step.
         next_value: Value at the following step.
         option_ended: True when the following step is a different option.
+        bootstrap: Value of the option that just ended. Zero tail when omitted.
 
     Returns:
         Residual at this step.
     """
     if option_ended:
-        next_value = torch.zeros_like(next_value)
+        if bootstrap is None:
+            next_value = torch.zeros_like(next_value)
+        else:
+            next_value = bootstrap.detach()
     return reward + gamma * next_value - value
 
 
@@ -161,21 +173,44 @@ def option_truncated_gae(gae, delta, gamma, tau, option_ended):
     return gae * gamma * tau + delta
 
 
-def oracle_option_target(future_target, delta, gamma, option_ended):
+def oracle_option_target(
+    future_target, delta, gamma, option_ended, bootstrap=None,
+):
     """Discounted state-change target inside one option.
 
     Args:
         future_target: Target accumulated after this step.
         delta: State change at this step.
-        gamma: Discount shared with the level-1 critic.
+        gamma: Discount of this oracle target.
+        option_ended: True when this step ends the option.
+        bootstrap: Oracle prediction for the option that just ended.
+            Zero target when omitted.
+
+    Returns:
+        Gamma times the future target plus delta. A finished option uses
+        ``bootstrap`` as that future target.
+    """
+    if option_ended:
+        if bootstrap is None:
+            return torch.zeros_like(delta)
+        future_target = bootstrap
+    return gamma * future_target.detach() + delta
+
+
+def finished_option_plug(plugs, index, option_ended):
+    """Bootstrap stored for an option that ended at ``index``.
+
+    Args:
+        plugs: One entry per rollout step. Missing plugs are None.
+        index: Step being updated.
         option_ended: True when this step ends the option.
 
     Returns:
-        Zero tensor when the option ends, otherwise gamma times the future target plus delta.
+        Stored bootstrap, or None when this step keeps a zero tail.
     """
-    if option_ended:
-        return torch.zeros_like(delta)
-    return gamma * future_target.detach() + delta
+    if not option_ended or index >= len(plugs):
+        return None
+    return plugs[index]
 
 
 def oracle_two_level_actor_loss(
@@ -448,7 +483,13 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 )
                 if use_oracle_two_level:
                     R = option_segment_return_step(
-                        R, player.rewards[i], args.gamma, option_ended,
+                        R,
+                        player.rewards[i],
+                        args.gamma,
+                        option_ended,
+                        finished_option_plug(
+                            player.option_end_values, i, option_ended,
+                        ),
                     )
                 else:
                     R = args.gamma * R + player.rewards[i]
@@ -465,6 +506,9 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                         player.values[i].data,
                         player.values[i + 1].data,
                         option_ended,
+                        finished_option_plug(
+                            player.option_end_values, i, option_ended,
+                        ),
                     )
                 else:
                     delta_t = (
@@ -482,14 +526,21 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 # Intrinsic critic target (oracle reward).
                 if args.w_restoration_loss > 0 and len(player.x_restoreds) > 0:
                     if use_oracle_two_level:
-                        target_ended = option_ended or (
+                        episode_ended = (
                             player.done and i + 1 == len(player.rewards)
                         )
+                        target_ended = option_ended or episode_ended
+                        oracle_plug = None
+                        if option_ended and not episode_ended:
+                            oracle_plug = finished_option_plug(
+                                player.option_end_oracle, i, option_ended,
+                            )
                         G_t = oracle_option_target(
                             G_t,
                             player.s1_states[i + 1] - player.s1_states[i],
-                            args.gamma,
+                            args.gamma_oracle,
                             target_ended,
+                            oracle_plug,
                         )
                     elif isinstance(player.model, model._FutureSharedDiffTargetMixin):
                         if len(player.shared_states) != len(player.rewards) + 1:
@@ -516,7 +567,13 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
 
                     if use_oracle_two_level:
                         R_intrinsic = option_segment_return_step(
-                            R_intrinsic, oracle_r, args.gamma, option_ended,
+                            R_intrinsic,
+                            oracle_r,
+                            args.gamma,
+                            option_ended,
+                            finished_option_plug(
+                                player.option_end_intrinsic, i, option_ended,
+                            ),
                         )
                     else:
                         R_intrinsic = args.gamma * R_intrinsic + oracle_r
@@ -532,6 +589,9 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                             player.values_intrinsic[i].data,
                             player.values_intrinsic[i + 1].data,
                             option_ended,
+                            finished_option_plug(
+                                player.option_end_intrinsic, i, option_ended,
+                            ),
                         ) * w_intrinsic
                     else:
                         delta_t_intrinsic = (
@@ -565,7 +625,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                         G2 = oracle_option_target(
                             G2,
                             player.s2_states[i + 1] - player.s2_states[i],
-                            args.gamma2,
+                            args.gamma_oracle2,
                             batch_ended,
                         )
                         cosine2 = -F.cosine_similarity(

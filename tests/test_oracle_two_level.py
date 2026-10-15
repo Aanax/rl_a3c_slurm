@@ -188,6 +188,13 @@ class OracleTwoLevelTest(unittest.TestCase):
         self.assertAlmostEqual(float(ended.item()), 1.0 - 0.25)
         self.assertAlmostEqual(float(continued.item()), 1.0 + 0.5 * 8.0 - 0.25)
 
+    def test_level1_td_delta_uses_the_finished_option_value(self):
+        ended = level1_option_delta(
+            torch.tensor(1.0), 0.5, torch.tensor(0.25), torch.tensor(8.0), True,
+            torch.tensor(3.0),
+        )
+        self.assertAlmostEqual(float(ended.item()), 1.0 + 0.5 * 3.0 - 0.25)
+
     def test_gae_drops_advantage_carried_from_the_next_option(self):
         ended = option_truncated_gae(
             torch.tensor(5.0), torch.tensor(1.0), 0.5, 1.0, True,
@@ -254,6 +261,25 @@ class OracleTwoLevelTest(unittest.TestCase):
         self.assertTrue(torch.equal(targets[2], torch.tensor([gamma * 10.0 + 3.0])))
         self.assertTrue(torch.equal(targets[1], torch.zeros(1)))
         self.assertTrue(torch.equal(targets[0], deltas[0]))
+
+    def test_oracle_target_uses_the_finished_option_prediction(self):
+        delta = torch.tensor([2.0])
+        plug = torch.tensor([4.0])
+        ended = oracle_option_target(
+            torch.tensor([99.0]), delta, 0.5, True, plug,
+        )
+        self.assertTrue(torch.equal(ended, torch.tensor([0.5 * 4.0 + 2.0])))
+
+    def test_option_return_uses_the_finished_option_value(self):
+        gamma = 0.5
+        ended = option_segment_return_step(
+            torch.tensor([[99.0]]),
+            torch.tensor([[1.0]]),
+            gamma,
+            True,
+            torch.tensor([[8.0]]),
+        )
+        self.assertAlmostEqual(float(ended.item()), 1.0 + gamma * 8.0)
 
     def test_oracle_target_keeps_a_vector_shape_when_the_option_ends(self):
         ended = oracle_option_target(
@@ -343,6 +369,8 @@ class OracleTwoLevelTest(unittest.TestCase):
         source = (Path(__file__).resolve().parents[1] / "src" / "train.py").read_text()
         self.assertIn("player.s1_states[i + 1] - player.s1_states[i]", source)
         self.assertIn("player.s2_states[i + 1] - player.s2_states[i]", source)
+        self.assertIn("player.s1_states[i + 1] - player.s1_states[i],\n                            args.gamma_oracle,", source)
+        self.assertIn("player.s2_states[i + 1] - player.s2_states[i],\n                            args.gamma_oracle2,", source)
         self.assertIn(
             "cosine2, advantage2.detach(), args.w_restoration_loss",
             source,
@@ -350,11 +378,17 @@ class OracleTwoLevelTest(unittest.TestCase):
 
     def test_train_cuts_level1_critic_at_option_end(self):
         source = (Path(__file__).resolve().parents[1] / "src" / "train.py").read_text()
-        self.assertIn("R, player.rewards[i], args.gamma, option_ended", source)
-        self.assertIn("R_intrinsic, oracle_r, args.gamma, option_ended", source)
+        player_source = (
+            Path(__file__).resolve().parents[1] / "src" / "player_util.py"
+        ).read_text()
+        self.assertIn("player.option_end_values, i, option_ended", source)
+        self.assertIn("player.option_end_intrinsic, i, option_ended", source)
+        self.assertIn("player.option_end_oracle, i, option_ended", source)
         self.assertIn("option_index=player.actions2[-1]", source)
         self.assertIn("level1_option_delta(", source)
         self.assertIn("option_truncated_gae(", source)
+        self.assertIn("def _remember_finished_option(", player_source)
+        self.assertIn("option_index=finished_option", player_source)
 
 
 if __name__ == "__main__":
