@@ -241,7 +241,14 @@ class OracleTwoLevelTest(unittest.TestCase):
 
     def test_train_level2_return_runs_through_the_batch(self):
         source = (Path(__file__).resolve().parents[1] / "src" / "train.py").read_text()
-        self.assertIn("R2 = level2_batch_return_step(R2, r2_i, args.gamma2)", source)
+        self.assertIn("R1 = player.values[-1].detach()", source)
+        self.assertIn("R2 = player.values2[-1].detach()", source)
+        self.assertIn("R1 = args.gamma * R1 + player.rewards[i]", source)
+        self.assertIn(
+            "R2 = args.gamma2 * R2 + (1.0 - args.gamma) * R1", source,
+        )
+        self.assertNotIn("args.gamma * level2_reward", source)
+        self.assertIn("option_index=player.actions2[-1]", source)
 
     def test_oracle_target_is_zero_at_option_end(self):
         gamma = 0.5
@@ -376,17 +383,17 @@ class OracleTwoLevelTest(unittest.TestCase):
             source,
         )
 
-    def test_train_cuts_level1_critic_at_option_end(self):
+    def test_external_critic_runs_through_the_batch(self):
         source = (Path(__file__).resolve().parents[1] / "src" / "train.py").read_text()
         player_source = (
             Path(__file__).resolve().parents[1] / "src" / "player_util.py"
         ).read_text()
-        self.assertIn("player.option_end_values, i, option_ended", source)
+        self.assertIn("R = args.gamma * R + player.rewards[i]", source)
+        self.assertNotIn("player.option_end_values", source)
+        self.assertNotIn("option_end_values", player_source)
         self.assertIn("player.option_end_intrinsic, i, option_ended", source)
         self.assertIn("player.option_end_oracle, i, option_ended", source)
-        self.assertIn("option_index=player.actions2[-1]", source)
-        self.assertIn("level1_option_delta(", source)
-        self.assertIn("option_truncated_gae(", source)
+        self.assertIn("gae_intrinsic = option_truncated_gae(", source)
         self.assertIn("def _remember_finished_option(", player_source)
         self.assertIn("option_index=finished_option", player_source)
 

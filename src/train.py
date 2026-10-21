@@ -476,40 +476,23 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     G2 = torch.zeros_like(player.oracle2_preds[-1])
                 else:
                     G2 = oracle2_bootstrap
+            if use_oracle_two_level and len(player.rewards) > 0:
+                # Level-2 target: R1 runs through the whole batch,
+                # R2 accumulates (1 - g1) * R1.
+                R1 = player.values[-1].detach()
+                R2 = player.values2[-1].detach()
             for i in reversed(range(len(player.rewards))):
                 option_ended = (
                     use_oracle_two_level
                     and option_changes_after(player.actions2, i)
                 )
-                if use_oracle_two_level:
-                    R = option_segment_return_step(
-                        R,
-                        player.rewards[i],
-                        args.gamma,
-                        option_ended,
-                        finished_option_plug(
-                            player.option_end_values, i, option_ended,
-                        ),
-                    )
-                else:
-                    R = args.gamma * R + player.rewards[i]
+                R = args.gamma * R + player.rewards[i]
                 advantage = R - player.values[i]
                 value_loss = value_loss + 0.5 * advantage.pow(2)
 
                 # Generalized Advantage Estimataion 1
                 if args.delta_t_mode == 'advantage':
                     delta_t = advantage.detach()
-                elif use_oracle_two_level:
-                    delta_t = level1_option_delta(
-                        player.rewards[i],
-                        args.gamma,
-                        player.values[i].data,
-                        player.values[i + 1].data,
-                        option_ended,
-                        finished_option_plug(
-                            player.option_end_values, i, option_ended,
-                        ),
-                    )
                 else:
                     delta_t = (
                         player.rewards[i]
@@ -518,8 +501,8 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     )
 
                 if use_oracle_two_level:
-                    r2_i = player.values[i].detach() * (1.0 - args.gamma)
-                    R2 = level2_batch_return_step(R2, r2_i, args.gamma2)
+                    R1 = args.gamma * R1 + player.rewards[i]
+                    R2 = args.gamma2 * R2 + (1.0 - args.gamma) * R1
                     advantage2 = R2 - player.values2[i]
                     value_loss2 = value_loss2 + 0.5 * advantage2.pow(2)
 
@@ -680,10 +663,6 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                         raise ValueError('delta_t_mode=advantage does not support hierarchical delta_t2')
                     gae = delta_t
                     gae_intrinsic = delta_t_intrinsic
-                elif use_oracle_two_level:
-                    gae = option_truncated_gae(
-                        gae, delta_t, args.gamma, args.tau, option_ended,
-                    )
                 elif delta_t2 is not None:
                     gae = gae * args.gamma * args.tau + (delta_t + delta_t2)
                 else:

@@ -30,7 +30,6 @@ class Agent(object):
         self.oracle2_preds = []
         self.s1_states = []
         self.s2_states = []
-        self.option_end_values = []
         self.option_end_intrinsic = []
         self.option_end_oracle = []
         self.kls = []
@@ -88,7 +87,7 @@ class Agent(object):
         return int(option_id)
 
     def _remember_finished_option(self, state, finished_option):
-        """Store the level-1 bootstrap of an option that just ended.
+        """Store the intrinsic-critic and oracle bootstrap of a finished option.
 
         Args:
             state: Observation at the boundary, shape ``[1, ...]``.
@@ -105,7 +104,6 @@ class Agent(object):
         if hasattr(self.model, 'memdiff_sum'):
             self.model.memdiff_sum = saved_sum
             self.model.memdiff_count = saved_count
-        self.option_end_values[-1] = output[0].detach()
         self.option_end_intrinsic[-1] = output[5].detach()
         self.option_end_oracle[-1] = output[4].detach()
 
@@ -233,7 +231,6 @@ class Agent(object):
         if pred_s2 is not None:
             self._store_hidden_transition(s1_t, s2_t, pred_s2)
             self.values_intrinsic2.append(value_intrinsic2)
-            self.option_end_values.append(None)
             self.option_end_intrinsic.append(None)
             self.option_end_oracle.append(None)
         if kl is not None:
@@ -298,7 +295,6 @@ class Agent(object):
         self.oracle2_preds = []
         self.s1_states = []
         self.s2_states = []
-        self.option_end_values = []
         self.option_end_intrinsic = []
         self.option_end_oracle = []
         self.kls = []
