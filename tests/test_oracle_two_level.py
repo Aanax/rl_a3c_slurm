@@ -368,7 +368,8 @@ class OracleTwoLevelTest(unittest.TestCase):
         source = (Path(__file__).resolve().parents[1] / "src" / "train.py").read_text()
         self.assertIn("advantage_intrinsic2.detach()", source)
         self.assertNotIn("(advantage2 + advantage_intrinsic2).detach()", source)
-        self.assertIn("delta_t + advantage2.detach()", source)
+        self.assertIn("delta2 = advantage2.detach()", source)
+        self.assertIn("delta_t + delta2", source)
         self.assertIn("R_intrinsic2, oracle_r2, args.gamma2", source)
         self.assertIn("(1.0 - args.gamma2) * cosine_const2", source)
 
@@ -379,7 +380,7 @@ class OracleTwoLevelTest(unittest.TestCase):
         self.assertIn("player.s1_states[i + 1] - player.s1_states[i],\n                            args.gamma_oracle,", source)
         self.assertIn("player.s2_states[i + 1] - player.s2_states[i],\n                            args.gamma_oracle2,", source)
         self.assertIn(
-            "cosine2, advantage2.detach(), args.w_restoration_loss",
+            "cosine2, delta2, args.w_restoration_loss",
             source,
         )
 

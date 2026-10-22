@@ -486,8 +486,12 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     use_oracle_two_level
                     and option_changes_after(player.actions2, i)
                 )
-                R = args.gamma * R + player.rewards[i]
-                advantage = R - player.values[i]
+                if use_oracle_two_level:
+                    R1 = args.gamma * R1 + player.rewards[i]
+                    advantage = R1 - player.values[i]
+                else:
+                    R = args.gamma * R + player.rewards[i]
+                    advantage = R - player.values[i]
                 value_loss = value_loss + 0.5 * advantage.pow(2)
 
                 # Generalized Advantage Estimataion 1
@@ -501,9 +505,9 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     )
 
                 if use_oracle_two_level:
-                    R1 = args.gamma * R1 + player.rewards[i]
                     R2 = args.gamma2 * R2 + (1.0 - args.gamma) * R1
                     advantage2 = R2 - player.values2[i]
+                    delta2 = advantage2.detach()
                     value_loss2 = value_loss2 + 0.5 * advantage2.pow(2)
 
                 # Intrinsic critic target (oracle reward).
@@ -590,7 +594,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     )
                     oracle1_advantage = delta_t
                     if use_oracle_two_level:
-                        oracle1_advantage = delta_t + advantage2.detach()
+                        oracle1_advantage = delta_t + delta2
                     restoration_loss = restoration_loss + external_advantage_restoration(
                         cosine_restoreds, oracle1_advantage, args.w_restoration_loss
                     )
@@ -617,7 +621,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                             dim=0,
                         )
                         restoration_loss = restoration_loss + external_advantage_restoration(
-                            cosine2, advantage2.detach(), args.w_restoration_loss,
+                            cosine2, delta2, args.w_restoration_loss,
                         )
                         cosine_const2 = F.cosine_similarity(
                             player.oracle2_preds[i].detach().view(-1),
