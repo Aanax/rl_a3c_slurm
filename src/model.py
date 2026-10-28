@@ -1096,6 +1096,19 @@ class A3CRules2378OracleTwoLevel(A3CRules2378OracleNoSplitSharedDiffIntrinsicCri
         onehot.scatter_(1, option_index, 1.0)
         return onehot.detach(), option_index
 
+    def _expected_external_value(self, critic_flat, logits2):
+        """External value averaged over the option distribution.
+
+        Args:
+            critic_flat: Critic features, shape ``[B, C]``.
+            logits2: Option-policy logits, shape ``[B, num_options]``.
+
+        Returns:
+            Expected external value, shape ``[B, 1]``.
+        """
+        probs = F.softmax(logits2, dim=1)
+        return self.critic_linear(torch.cat([critic_flat, probs], dim=1))
+
     def _oracle_output(self, actor_feat):
         """Predict the shared-encoder map.
 
@@ -1107,7 +1120,7 @@ class A3CRules2378OracleTwoLevel(A3CRules2378OracleNoSplitSharedDiffIntrinsicCri
         """
         return self.oracle1_head(actor_feat)
 
-    def forward(self, inputs, hx, cx, mem=None, option_index=None):
+    def forward(self, inputs, hx, cx, mem=None, option_index=None, marginal_external=False):
         actor_flat, critic_flat, pred_s1, shared = self._forward_core(inputs)
         s2, _, _, _ = self.level2_encoder(shared)
         s2_flat = s2.reshape(s2.size(0), -1)
@@ -1115,6 +1128,10 @@ class A3CRules2378OracleTwoLevel(A3CRules2378OracleNoSplitSharedDiffIntrinsicCri
         logits2 = self.actor_linear2(s2_flat)
         value2 = self.critic_linear2(s2_flat)
         value_intrinsic2 = self.critic_linear_intrinsic2(s2_flat)
+        if marginal_external:
+            self.marginal_external_value = self._expected_external_value(
+                critic_flat, logits2,
+            ).detach()
         # Level-1 heads see the option. Both oracles already ran without it.
         option_onehot, option_index = self._option_onehot(logits2, option_index)
         actor_in = torch.cat([actor_flat, option_onehot], dim=1)

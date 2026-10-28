@@ -131,48 +131,6 @@ def level2_batch_return_step(running_return, reward, gamma):
     return gamma * running_return + reward
 
 
-def level1_option_delta(
-    reward, gamma, value, next_value, option_ended, bootstrap=None,
-):
-    """Temporal-difference residual for one option step.
-
-    Args:
-        reward: Reward at this step.
-        gamma: Discount.
-        value: Value at this step.
-        next_value: Value at the following step.
-        option_ended: True when the following step is a different option.
-        bootstrap: Value of the option that just ended. Zero tail when omitted.
-
-    Returns:
-        Residual at this step.
-    """
-    if option_ended:
-        if bootstrap is None:
-            next_value = torch.zeros_like(next_value)
-        else:
-            next_value = bootstrap.detach()
-    return reward + gamma * next_value - value
-
-
-def option_truncated_gae(gae, delta, gamma, tau, option_ended):
-    """One backward GAE step cut at an option boundary.
-
-    Args:
-        gae: Advantage accumulated from later steps.
-        delta: Temporal-difference residual at this step.
-        gamma: Discount.
-        tau: GAE trace-decay parameter.
-        option_ended: True when later steps belong to another option.
-
-    Returns:
-        Generalized advantage at this step.
-    """
-    if option_ended:
-        gae = torch.zeros_like(gae)
-    return gae * gamma * tau + delta
-
-
 def oracle_option_target(
     future_target, delta, gamma, option_ended, bootstrap=None,
 ):
@@ -380,6 +338,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             model_output = None
             oracle_bootstrap = None
             oracle2_bootstrap = None
+            external_bootstrap = R.detach().clone()
             w_intrinsic = 0.0
             if isinstance(player.model, (
                 model.A3CRules2378OracleIntrinsicCritic,
@@ -395,7 +354,9 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                         player.hx,
                         player.cx,
                         option_index=player.actions2[-1],
+                        marginal_external=True,
                     )
+                    external_bootstrap = player.model.marginal_external_value.detach()
                 else:
                     model_output = player.model(
                         state.unsqueeze(0), player.hx, player.cx
@@ -477,10 +438,12 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 else:
                     G2 = oracle2_bootstrap
             if use_oracle_two_level and len(player.rewards) > 0:
-                # Level-2 target: R1 runs through the whole batch,
-                # R2 accumulates (1 - g1) * R1.
+                # R1 is the level-1 return inside the level-2 reward.
+                # R1_critic is the external critic through the batch. Its tail
+                # does not name the next option.
                 R1 = player.values[-1].detach()
                 R2 = player.values2[-1].detach()
+                R1_critic = external_bootstrap.detach()
             for i in reversed(range(len(player.rewards))):
                 option_ended = (
                     use_oracle_two_level
@@ -488,7 +451,8 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 )
                 if use_oracle_two_level:
                     R1 = args.gamma * R1 + player.rewards[i]
-                    advantage = R1 - player.values[i]
+                    R1_critic = args.gamma * R1_critic + player.rewards[i]
+                    advantage = R1_critic - player.values[i]
                 else:
                     R = args.gamma * R + player.rewards[i]
                     advantage = R - player.values[i]
@@ -569,17 +533,6 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
 
                     if args.delta_t_mode == 'advantage':
                         delta_t_intrinsic = intrinsic_advantage.detach() * w_intrinsic
-                    elif use_oracle_two_level:
-                        delta_t_intrinsic = level1_option_delta(
-                            oracle_r,
-                            args.gamma,
-                            player.values_intrinsic[i].data,
-                            player.values_intrinsic[i + 1].data,
-                            option_ended,
-                            finished_option_plug(
-                                player.option_end_intrinsic, i, option_ended,
-                            ),
-                        ) * w_intrinsic
                     else:
                         delta_t_intrinsic = (
                             oracle_r
@@ -673,16 +626,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     gae = gae * args.gamma * args.tau + delta_t
 
                 if args.delta_t_mode == 'td':
-                    if use_oracle_two_level:
-                        gae_intrinsic = option_truncated_gae(
-                            gae_intrinsic,
-                            delta_t_intrinsic,
-                            args.gamma,
-                            args.tau,
-                            option_ended,
-                        )
-                    else:
-                        gae_intrinsic = gae_intrinsic * args.gamma * args.tau + delta_t_intrinsic
+                    gae_intrinsic = gae_intrinsic * args.gamma * args.tau + delta_t_intrinsic
                 policy_advantage = gae + gae_intrinsic
                 if args.empirical_distribution_correction:
                     policy_advantage = policy_advantage / (player.log_probs[i].detach().exp() + args.empirical_distribution_correction_epsilon)
