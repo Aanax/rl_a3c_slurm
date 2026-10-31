@@ -450,6 +450,10 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     and option_changes_after(player.actions2, i)
                 )
                 if use_oracle_two_level:
+                    if option_ended:
+                        R1 = finished_option_plug(
+                            player.option_end_values, i, option_ended,
+                        )
                     R1 = args.gamma * R1 + player.rewards[i]
                     R1_critic = args.gamma * R1_critic + player.rewards[i]
                     advantage = R1_critic - player.values[i]

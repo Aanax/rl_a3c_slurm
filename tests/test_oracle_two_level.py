@@ -236,6 +236,7 @@ class OracleTwoLevelTest(unittest.TestCase):
         self.assertIn("R1 = player.values[-1].detach()", source)
         self.assertIn("R2 = player.values2[-1].detach()", source)
         self.assertIn("R1_critic = external_bootstrap.detach()", source)
+        self.assertIn("player.option_end_values, i, option_ended", source)
         self.assertIn("R1 = args.gamma * R1 + player.rewards[i]", source)
         self.assertIn("R1_critic = args.gamma * R1_critic + player.rewards[i]", source)
         self.assertIn("advantage = R1_critic - player.values[i]", source)
@@ -386,8 +387,8 @@ class OracleTwoLevelTest(unittest.TestCase):
             Path(__file__).resolve().parents[1] / "src" / "player_util.py"
         ).read_text()
         self.assertIn("R = args.gamma * R + player.rewards[i]", source)
-        self.assertNotIn("player.option_end_values", source)
-        self.assertNotIn("option_end_values", player_source)
+        self.assertIn("player.option_end_values, i, option_ended", source)
+        self.assertIn("option_end_values[-1] = output[0].detach()", player_source)
         self.assertIn("player.option_end_intrinsic, i, option_ended", source)
         self.assertIn("player.option_end_oracle, i, option_ended", source)
         self.assertNotIn("gae_intrinsic = option_truncated_gae(", source)
