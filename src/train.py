@@ -450,10 +450,6 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     and option_changes_after(player.actions2, i)
                 )
                 if use_oracle_two_level:
-                    if option_ended:
-                        R1 = finished_option_plug(
-                            player.option_end_values, i, option_ended,
-                        )
                     R1 = args.gamma * R1 + player.rewards[i]
                     R1_critic = args.gamma * R1_critic + player.rewards[i]
                     advantage = R1_critic - player.values[i]
@@ -477,6 +473,9 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     advantage2 = R2 - player.values2[i]
                     delta2 = advantage2.detach()
                     value_loss2 = value_loss2 + 0.5 * advantage2.pow(2)
+                    # option_end_values[i - 1] is V1(s_i, option of step i - 1).
+                    if i > 0 and option_changes_after(player.actions2, i - 1):
+                        R1 = player.option_end_values[i - 1]
 
                 # Intrinsic critic target (oracle reward).
                 if args.w_restoration_loss > 0 and len(player.x_restoreds) > 0:

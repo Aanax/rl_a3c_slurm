@@ -236,7 +236,11 @@ class OracleTwoLevelTest(unittest.TestCase):
         self.assertIn("R1 = player.values[-1].detach()", source)
         self.assertIn("R2 = player.values2[-1].detach()", source)
         self.assertIn("R1_critic = external_bootstrap.detach()", source)
-        self.assertIn("player.option_end_values, i, option_ended", source)
+        self.assertIn(
+            "if i > 0 and option_changes_after(player.actions2, i - 1):\n"
+            "                        R1 = player.option_end_values[i - 1]",
+            source,
+        )
         self.assertIn("R1 = args.gamma * R1 + player.rewards[i]", source)
         self.assertIn("R1_critic = args.gamma * R1_critic + player.rewards[i]", source)
         self.assertIn("advantage = R1_critic - player.values[i]", source)
@@ -387,7 +391,7 @@ class OracleTwoLevelTest(unittest.TestCase):
             Path(__file__).resolve().parents[1] / "src" / "player_util.py"
         ).read_text()
         self.assertIn("R = args.gamma * R + player.rewards[i]", source)
-        self.assertIn("player.option_end_values, i, option_ended", source)
+        self.assertIn("R1 = player.option_end_values[i - 1]", source)
         self.assertIn("option_end_values[-1] = output[0].detach()", player_source)
         self.assertIn("player.option_end_intrinsic, i, option_ended", source)
         self.assertIn("player.option_end_oracle, i, option_ended", source)
