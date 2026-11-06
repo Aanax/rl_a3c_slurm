@@ -107,7 +107,16 @@ class OracleTwoLevelTest(unittest.TestCase):
         self.assertEqual(int(option2[8].item()), 2)
         self.assertAlmostEqual(float(option0[0].item()), 0.0)
         self.assertAlmostEqual(float(option2[0].item()), 2.0)
-        self.assertTrue(torch.equal(option0[4], option2[4]))
+        net.oracle1_head.weight.data.zero_()
+        net.oracle1_head.bias.data.zero_()
+        for option_id in range(num_options):
+            net.oracle1_head.weight.data[0, 64 + option_id, 0, 0] = float(option_id)
+        with torch.no_grad():
+            oracle0 = forward_option(0)
+            oracle2 = forward_option(2)
+        self.assertAlmostEqual(float(oracle0[4][0, 0, 0, 0].item()), 0.0)
+        self.assertAlmostEqual(float(oracle2[4][0, 0, 0, 0].item()), 2.0)
+        self.assertTrue(torch.equal(option0[-1], option2[-1]))
 
     def test_option_return_covers_only_that_option(self):
         gamma = 0.5

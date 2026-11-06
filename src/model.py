@@ -1054,7 +1054,9 @@ class A3CRules2378OracleTwoLevel(A3CRules2378OracleNoSplitSharedDiffIntrinsicCri
         s2_channels = 32
         s2_dim = s2_channels * 4 * 4
         self.level2_encoder = EncoderRules234_2()
-        self.oracle1_head = nn.Conv2d(actor_channels, 64, kernel_size=1)
+        self.oracle1_head = nn.Conv2d(
+            actor_channels + self.num_options, 64, kernel_size=1,
+        )
         self.oracle2_head = nn.Conv2d(s2_channels, s2_channels, kernel_size=1)
         self._init_branch_conv(self.oracle1_head)
         self._init_branch_conv(self.oracle2_head)
@@ -1110,18 +1112,33 @@ class A3CRules2378OracleTwoLevel(A3CRules2378OracleNoSplitSharedDiffIntrinsicCri
         return self.critic_linear(torch.cat([critic_flat, probs], dim=1))
 
     def _oracle_output(self, actor_feat):
-        """Predict the shared-encoder map.
+        """Skip the option-conditioned oracle until the one-hot exists.
 
         Args:
-            actor_feat: Actor-branch feature map.
+            actor_feat: Shared encoder map.
 
         Returns:
-            Predicted ``s1`` map.
+            The same map. ``forward`` replaces it with the oracle prediction.
         """
-        return self.oracle1_head(actor_feat)
+        return actor_feat
+
+    def _oracle1_with_option(self, shared, option_onehot):
+        """Predict the s1 change from the shared map and the option.
+
+        Args:
+            shared: Shared encoder map, shape ``[B, 64, H, W]``.
+            option_onehot: Detached option one-hot, shape ``[B, num_options]``.
+
+        Returns:
+            Predicted s1 change, shape ``[B, 64, H, W]``.
+        """
+        option_map = option_onehot[:, :, None, None].expand(
+            -1, -1, shared.size(2), shared.size(3),
+        )
+        return self.oracle1_head(torch.cat([shared, option_map], dim=1))
 
     def forward(self, inputs, hx, cx, mem=None, option_index=None, marginal_external=False):
-        actor_flat, critic_flat, pred_s1, shared = self._forward_core(inputs)
+        actor_flat, critic_flat, _, shared = self._forward_core(inputs)
         s2, _, _, _ = self.level2_encoder(shared)
         s2_flat = s2.reshape(s2.size(0), -1)
         pred_s2 = self.oracle2_head(s2)
@@ -1132,8 +1149,9 @@ class A3CRules2378OracleTwoLevel(A3CRules2378OracleNoSplitSharedDiffIntrinsicCri
             self.marginal_external_value = self._expected_external_value(
                 critic_flat, logits2,
             ).detach()
-        # Level-1 heads see the option. Both oracles already ran without it.
+        # Level-1 heads and oracle 1 see the option. Oracle 2 already ran without it.
         option_onehot, option_index = self._option_onehot(logits2, option_index)
+        pred_s1 = self._oracle1_with_option(shared, option_onehot)
         actor_in = torch.cat([actor_flat, option_onehot], dim=1)
         critic_in = torch.cat([critic_flat, option_onehot], dim=1)
         hx = torch.Tensor([0])
