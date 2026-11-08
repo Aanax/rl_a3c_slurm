@@ -190,7 +190,7 @@ class SharedFutureDeltaOracleTest(unittest.TestCase):
             and node.test.operand.attr == 'done'
             and any(isinstance(child, ast.If) for child in node.body)
         )
-        block = compile(ast.Module(body=bootstrap.body[:3]), train_path, 'exec')
+        block = compile(ast.Module(body=bootstrap.body), train_path, 'exec')
         player = SimpleNamespace(
             done=False, state=agent.state, hx=agent.hx, cx=agent.cx,
             model=sequence_model, shared_states=agent.shared_states,
@@ -228,7 +228,7 @@ class SharedFutureDeltaOracleTest(unittest.TestCase):
         self.assertEqual(sequence_model.terminal_calls, 1)
 
     def test_train_uses_discounted_shared_delta_target(self):
-        train_path = os.path.join(os.path.dirname(__file__), '..', 'src', 'train.py')
+        train_path = os.path.join(os.path.dirname(__file__), '..', 'src', 'oracle_loss.py')
         with open(train_path) as train_file:
             tree = ast.parse(train_file.read())
         target_block = compile(ast.Module(body=[next(

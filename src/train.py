@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from environment import atari_env
 from utils import ensure_shared_grads
 import model
+from oracle_loss import compute_oracle_losses
 from player_util import Agent
 from torch.autograd import Variable
 import time
@@ -200,24 +201,41 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 gae_intrinsic = torch.zeros(1, 1)
             model_output = None
             if not player.done:
-                state = player.state
-                model_output = player.model(
-                    state.unsqueeze(0), player.hx, player.cx
-                )
-                if isinstance(player.model, model._FutureSharedDiffTargetMixin):
-                    player.shared_states.append(model_output[-1].detach())
-                value = model_output[0]
-                R = value.detach()
-                if isinstance(player.model, (model.A3CRules2378OracleIntrinsicCritic, model.A3CRules2378OracleFCIntrinsicCritic, model._IntrinsicCriticMixin)) and len(model_output) >= 6:
-                    R_intrinsic = model_output[5].detach()
-                    w_intrinsic = 1.0
-                else:
-                    R_intrinsic = value.detach()
-                    w_intrinsic = 0.0
-                # For hierarchical models, also get V2
-                if len(model_output) >= 8:
-                    value2 = model_output[6]
-                    R2 = value2.detach()
+                bootstrap_shared_state = None
+                if isinstance(player.model, model._SharedFeatureDiffMixin):
+                    bootstrap_shared_state = (
+                        player.model.prev_shared,
+                        player.model.memdiff_sum,
+                        player.model.memdiff_count,
+                        player.model.memdiff_w,
+                        player.model.memdiff_w_prev,
+                    )
+                try:
+                    state = player.state
+                    model_output = player.model(
+                        state.unsqueeze(0), player.hx, player.cx
+                    )
+                    if isinstance(player.model, model._FutureSharedDiffTargetMixin):
+                        player.shared_states.append(model_output[-1].detach())
+                    value = model_output[0]
+                    R = value.detach()
+                    if isinstance(player.model, (model.A3CRules2378OracleIntrinsicCritic, model.A3CRules2378OracleFCIntrinsicCritic, model._IntrinsicCriticMixin)) and len(model_output) >= 6:
+                        R_intrinsic = model_output[5].detach()
+                        w_intrinsic = 1.0
+                    else:
+                        R_intrinsic = value.detach()
+                        w_intrinsic = 0.0
+                    # For hierarchical models, also get V2
+                    if len(model_output) >= 8:
+                        value2 = model_output[6]
+                        R2 = value2.detach()
+                finally:
+                    if bootstrap_shared_state is not None:
+                        (player.model.prev_shared,
+                         player.model.memdiff_sum,
+                         player.model.memdiff_count,
+                         player.model.memdiff_w,
+                         player.model.memdiff_w_prev) = bootstrap_shared_state
             player.values.append(R)
             player.values_intrinsic.append(R_intrinsic)
             # Check if model is hierarchical (has V2 and a2 outputs)
@@ -246,9 +264,9 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 # V2Target = V2[H].detach() - use the last value2 (bootstrap)
                 V2Target = player.values2[-1].detach()
 
-            if args.w_restoration_loss > 0 and len(player.x_restoreds) > 0:
-                G_t = player.x_restoreds[-1].clone()
             for i in reversed(range(len(player.rewards))):
+                if not is_hierarchical:
+                    continue
                 R = args.gamma * R + player.rewards[i]
                 advantage = R - player.values[i]
                 value_loss = value_loss + 0.5 * advantage.pow(2)
@@ -263,52 +281,7 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                         - player.values[i].data
                     )
 
-                # Intrinsic critic target (oracle reward).
-                if args.w_restoration_loss > 0 and len(player.x_restoreds) > 0:
-                    if isinstance(player.model, model._FutureSharedDiffTargetMixin):
-                        if len(player.shared_states) != len(player.rewards) + 1:
-                            raise ValueError('shared feature transitions are misaligned')
-                        G_t = (G_t * args.gamma_restoration
-                               + player.shared_states[i + 1] - player.shared_states[i])
-                    else:
-                        G_t = G_t * args.gamma_restoration + player.next_states[i] - player.states[i]
-
-                    if getattr(player.model, 'predicts_shared_diff', False):
-                        G_const = G_t.detach().view(-1)
-                    elif args.relu_g_const:
-                        G_const = F.relu(G_t.detach().view(-1))
-                    else:
-                        G_const = G_t.detach().view(-1)
-
-                    cosine_const = F.cosine_similarity(
-                        player.x_restoreds[i].detach().view(-1),
-                        G_const,
-                        dim=0
-                    ).squeeze(0)
-                    cosine_const_values.append(cosine_const.item())
-                    oracle_r = (1.0 - args.gamma) * cosine_const
-
-                    R_intrinsic = args.gamma * R_intrinsic + oracle_r
-                    intrinsic_advantage = R_intrinsic - player.values_intrinsic[i]
-                    value_intrinsic_loss = value_intrinsic_loss + 0.5 * intrinsic_advantage.pow(2)
-
-                    if args.delta_t_mode == 'advantage':
-                        delta_t_intrinsic = intrinsic_advantage.detach() * w_intrinsic
-                    else:
-                        delta_t_intrinsic = (
-                            oracle_r
-                            + args.gamma * player.values_intrinsic[i + 1].data
-                            - player.values_intrinsic[i].data
-                        ) * w_intrinsic
-
-                    cosine_restoreds = -F.cosine_similarity(
-                        player.x_restoreds[i].view(-1),
-                        G_const,
-                        dim=0,
-                    )
-                    restoration_loss = restoration_loss + args.w_restoration_loss * cosine_restoreds * delta_t
-                else:
-                    delta_t_intrinsic = 0.0
+                delta_t_intrinsic = 0.0
 
                 # Level 2 loss
                 delta_t2 = None
@@ -366,6 +339,15 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                         - (player.log_probs2[i] * gae2)
                         - (args.entropy_coef * player.entropies2[i])
                     )
+
+            if not is_hierarchical:
+                (
+                    policy_loss,
+                    value_loss,
+                    value_intrinsic_loss,
+                    restoration_loss,
+                    cosine_const_values,
+                ) = compute_oracle_losses(args, player, R, R_intrinsic, w_intrinsic)
 
             # Additional losses for VAE models (only compute if weights > 0)
             kld_loss = 0

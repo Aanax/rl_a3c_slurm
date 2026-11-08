@@ -41,7 +41,7 @@ class Agent(object):
         model_output = self.model(
             current_state, self.hx, self.cx, None
         )
-        if isinstance(self.model, model_module._FutureSharedDiffTargetMixin):
+        if getattr(self.model, 'predicts_shared_diff', False):
             shared_t = model_output[-1].detach()
             model_output = model_output[:-1]
         else:
@@ -118,6 +118,8 @@ class Agent(object):
             if hasattr(self.model, 'memdiff_sum'):
                 self.model.memdiff_sum = None
                 self.model.memdiff_count = 0
+                self.model.memdiff_w = 0.0
+                self.model.memdiff_w_prev = 1.0
 
         self.eps_len += 1
         self.reward = max(min(self.reward, 1), -1)
@@ -154,6 +156,8 @@ class Agent(object):
                     if hasattr(self.model, 'memdiff_sum'):
                         self.model.memdiff_sum = None
                         self.model.memdiff_count = 0
+                        self.model.memdiff_w = 0.0
+                        self.model.memdiff_w_prev = 1.0
                 except:
                     pass
                 

@@ -906,6 +906,8 @@ class _SharedFeatureDiffMixin:
     prev_shared = None
     memdiff_sum = None
     memdiff_count = 0
+    memdiff_w = 0.0
+    memdiff_w_prev = 1.0
     _VALID_MODES = ('shared', 'diff', 'concat', 'concat_memdiff', 'concat_memdiff_raw')
 
     def __init__(self, num_inputs, action_space, args):
@@ -919,15 +921,16 @@ class _SharedFeatureDiffMixin:
     def _memory_diffs(self, shared):
         if self.memdiff_sum is None or self.memdiff_count == 0:
             normalized = raw = torch.zeros_like(shared)
+            self.memdiff_sum = shared
         else:
-            raw = shared - self.memdiff_sum * (1.0 - self.gamma_memory)
-            if self.gamma_memory == 1.0:
-                normalized = shared - (self.memdiff_sum / self.memdiff_count)
-            else:
-                weight = (1.0 - self.gamma_memory) / (1.0 - self.gamma_memory ** self.memdiff_count)
-                normalized = shared - self.memdiff_sum * weight
+            # The stored sum is scaled by the previous history weight.
+            raw = shared - self.memdiff_sum * ((1.0 - self.gamma_memory) * self.memdiff_w_prev)
+            corrected = self.memdiff_sum * (self.memdiff_w_prev / self.memdiff_w)
+            normalized = shared - corrected
+            self.memdiff_sum = shared / self.memdiff_w + self.gamma_memory * corrected
+            self.memdiff_w_prev = self.memdiff_w
 
-        self.memdiff_sum = shared if self.memdiff_sum is None else shared + self.gamma_memory * self.memdiff_sum
+        self.memdiff_w += self.gamma_memory ** self.memdiff_count
         self.memdiff_count += 1
         return normalized, raw
 

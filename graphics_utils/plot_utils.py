@@ -168,7 +168,7 @@ def remove_short_logs(logs_folder, min_len=50):
 
 from scipy.interpolate import interp1d
 def get_mean_interpolated_stats_df(logs_folder, target_value = "reward_mean_10", num_points=500, default_r=-21, verbose=2,
-                                  min_frames_in_log_to_use_it=900000):
+                                  min_frames_in_log_to_use_it=900000, log_prefix=''):
     """
     list all fines in logs_dir
     get length of minimal log (in lines!)
@@ -184,7 +184,7 @@ def get_mean_interpolated_stats_df(logs_folder, target_value = "reward_mean_10",
     if verbose==2:
         print("verbose ", verbose)
     
-    listdir = [i for i in os.listdir(logs_folder) if (not os.path.isdir(logs_folder+i))]
+    listdir = [i for i in os.listdir(logs_folder) if (not os.path.isdir(logs_folder+i)) and i.startswith(log_prefix)]
     print("num of logs in folder ", len(listdir), flush=True)
     
     for logname in listdir:

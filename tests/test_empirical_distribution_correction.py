@@ -8,7 +8,7 @@ import torch
 
 
 def _policy_loss_block():
-    train_path = os.path.join(os.path.dirname(__file__), '..', 'src', 'train.py')
+    train_path = os.path.join(os.path.dirname(__file__), '..', 'src', 'oracle_loss.py')
     with open(train_path) as train_file:
         tree = ast.parse(train_file.read())
     body = next(

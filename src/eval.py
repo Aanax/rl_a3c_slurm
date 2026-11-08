@@ -164,6 +164,8 @@ def _reset_model_memory(net):
     if hasattr(net, 'memdiff_sum'):
         net.memdiff_sum = None
         net.memdiff_count = 0
+        net.memdiff_w = 0.0
+        net.memdiff_w_prev = 1.0
 
 
 def run_evaluation(net, env, args):
