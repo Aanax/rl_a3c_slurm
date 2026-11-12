@@ -227,49 +227,13 @@ class SharedFutureDeltaOracleTest(unittest.TestCase):
         self.assertEqual(sequence_model.forward_calls, 2)
         self.assertEqual(sequence_model.terminal_calls, 1)
 
-    def test_train_uses_discounted_shared_delta_target(self):
+    def test_train_uses_option_activation_for_the_oracle_target(self):
         train_path = os.path.join(os.path.dirname(__file__), '..', 'src', 'train.py')
         with open(train_path) as train_file:
-            tree = ast.parse(train_file.read())
-        target_block = compile(ast.Module(body=[next(
-            node for node in ast.walk(tree) if isinstance(node, ast.If)
-            and isinstance(node.test, ast.Call)
-            and isinstance(node.test.func, ast.Name)
-            and node.test.func.id == 'isinstance'
-            and any(isinstance(child, ast.Assign)
-                    and any(isinstance(target, ast.Name) and target.id == 'G_t'
-                            for target in child.targets)
-                    for child in ast.walk(node))
-            and any(isinstance(child, ast.Attribute) and child.attr == 'shared_states'
-                    for child in ast.walk(node))
-        )]), train_path, 'exec')
-        player = SimpleNamespace(
-            model=_TargetModel(),
-            states=[torch.tensor([100.0])],
-            next_states=[torch.tensor([200.0])],
-            shared_states=[torch.tensor([1.0]), torch.tensor([-2.0])],
-            rewards=[0.0],
-        )
-        scope = {'F': torch.nn.functional, 'model': model,
-                 'args': SimpleNamespace(gamma_restoration=0.5, relu_g_const=True),
-                 'player': player, 'i': 0, 'G_t': torch.tensor([-99.0])}
-        exec(target_block, scope)
-        self.assertTrue(torch.equal(scope['G_t'], torch.tensor([-52.5])))
-
-        player.model = _LegacyOracleModel()
-        scope = {'F': torch.nn.functional, 'model': model,
-                 'args': SimpleNamespace(gamma_restoration=0.5, relu_g_const=False),
-                 'player': player, 'i': 0, 'G_t': torch.tensor([-99.0])}
-        exec(target_block, scope)
-        self.assertTrue(torch.equal(scope['G_t'], torch.tensor([50.5])))
-
-        player.states[0] = torch.tensor([1.0])
-        player.next_states[0] = torch.tensor([-2.0])
-        scope = {'F': torch.nn.functional, 'model': model,
-                 'args': SimpleNamespace(gamma_restoration=0.0, relu_g_const=True),
-                 'player': player, 'i': 0, 'G_t': torch.tensor([0.0])}
-        exec(target_block, scope)
-        self.assertTrue(torch.equal(scope['G_t'], torch.tensor([-3.0])))
+            source = train_file.read()
+        self.assertIn('G_t = oracle_option_target(', source)
+        self.assertNotIn('G_t = option_activation_returns(', source)
+        self.assertNotIn('args.gamma_restoration', source)
 
     def test_eval_keeps_shared_oracle_prediction(self):
         eval_path = os.path.join(os.path.dirname(__file__), '..', 'src', 'eval.py')

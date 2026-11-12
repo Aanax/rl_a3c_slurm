@@ -15,8 +15,8 @@ def _load_train_helpers():
     tree = ast.parse(train_path.read_text())
     wanted = {
         "_option_index",
-        "option_changes_after",
-        "option_segment_return_step",
+        "activation_bootstrap",
+        "option_activation_returns",
         "level2_batch_return_step",
         "oracle_option_target",
         "oracle_two_level_actor_loss",
@@ -33,8 +33,8 @@ def _load_train_helpers():
 
 
 _HELPERS = _load_train_helpers()
-option_changes_after = _HELPERS["option_changes_after"]
-option_segment_return_step = _HELPERS["option_segment_return_step"]
+activation_bootstrap = _HELPERS["activation_bootstrap"]
+option_activation_returns = _HELPERS["option_activation_returns"]
 level2_batch_return_step = _HELPERS["level2_batch_return_step"]
 oracle_option_target = _HELPERS["oracle_option_target"]
 oracle_two_level_actor_loss = _HELPERS["oracle_two_level_actor_loss"]
@@ -53,18 +53,23 @@ def _args(num_options):
     )
 
 
-def _walk_option_returns(rewards, option_ids, gamma, bootstrap):
-    running = bootstrap.clone()
-    returns = [None] * len(rewards)
-    for index in reversed(range(len(rewards))):
-        running = option_segment_return_step(
-            running,
-            rewards[index],
-            gamma,
-            option_changes_after(option_ids, index),
-        )
-        returns[index] = running.clone()
-    return returns
+def _walk_activation_returns(rewards, option_ids, gamma, batch_tail, plugs):
+    num_options = max(option_ids) + 1
+    active = [False] * num_options
+    returns = [None] * num_options
+    step_returns = [None] * len(rewards)
+    n_steps = len(rewards)
+    for index in reversed(range(n_steps)):
+        option_id = option_ids[index]
+        bootstrap = None
+        if not active[option_id]:
+            bootstrap = activation_bootstrap(
+                index, n_steps, batch_tail, plugs,
+            )
+        step_returns[index] = option_activation_returns(
+            active, returns, option_id, rewards[index], gamma, bootstrap,
+        ).clone()
+    return step_returns
 
 
 class OracleTwoLevelTest(unittest.TestCase):
@@ -122,8 +127,12 @@ class OracleTwoLevelTest(unittest.TestCase):
         gamma = 0.5
         rewards = [torch.tensor([[float(value)]]) for value in (1.0, 2.0, 3.0, 4.0, 5.0)]
         option_ids = [0, 0, 1, 1, 1]
-        returns = _walk_option_returns(
-            rewards, option_ids, gamma, torch.tensor([[10.0]])
+        returns = _walk_activation_returns(
+            rewards,
+            option_ids,
+            gamma,
+            torch.tensor([[10.0]]),
+            [None, torch.tensor([[0.0]]), None, None, None],
         )
 
         self.assertAlmostEqual(float(returns[1].item()), 2.0)
@@ -136,20 +145,22 @@ class OracleTwoLevelTest(unittest.TestCase):
 
     def test_two_step_and_three_step_options_do_not_share_rewards(self):
         gamma = 0.25
-        two_step = _walk_option_returns(
+        two_step = _walk_activation_returns(
             [torch.tensor([[1.0]]), torch.tensor([[2.0]]), torch.tensor([[9.0]])],
             [4, 4, 7],
             gamma,
             torch.tensor([[0.0]]),
+            [None, torch.tensor([[0.0]]), None],
         )
         self.assertAlmostEqual(float(two_step[1].item()), 2.0)
         self.assertAlmostEqual(float(two_step[0].item()), 1.0 + gamma * 2.0)
 
-        three_step = _walk_option_returns(
+        three_step = _walk_activation_returns(
             [torch.tensor([[3.0]]), torch.tensor([[4.0]]), torch.tensor([[5.0]])],
             [1, 1, 1],
             gamma,
             torch.tensor([[8.0]]),
+            [None, None, None],
         )
         self.assertAlmostEqual(float(three_step[2].item()), 5.0 + gamma * 8.0)
         self.assertAlmostEqual(
@@ -242,18 +253,12 @@ class OracleTwoLevelTest(unittest.TestCase):
 
     def test_train_level2_return_runs_through_the_batch(self):
         source = (Path(__file__).resolve().parents[1] / "src" / "train.py").read_text()
-        self.assertIn("R1 = player.values[-1].detach()", source)
+        self.assertIn("external_batch_tail = player.values[-1].detach()", source)
         self.assertIn("R2 = player.values2[-1].detach()", source)
-        self.assertIn("R1_critic = external_bootstrap.detach()", source)
-        self.assertIn(
-            "if i > 0 and option_changes_after(player.actions2, i - 1):\n"
-            "                        R1 = player.option_end_values[i - 1]",
-            source,
-        )
-        self.assertIn("R1 = args.gamma * R1 + player.rewards[i]", source)
-        self.assertIn("R1_critic = args.gamma * R1_critic + player.rewards[i]", source)
-        self.assertIn("advantage = R1_critic - player.values[i]", source)
-        self.assertIn("marginal_external=True", source)
+        self.assertNotIn("R1_critic", source)
+        self.assertIn("R1 = option_activation_returns(", source)
+        self.assertIn("advantage = R1 - player.values[i]", source)
+        self.assertNotIn("marginal_external=True", source)
         self.assertIn(
             "R2 = args.gamma2 * R2 + (1.0 - args.gamma) * R1", source,
         )
@@ -263,7 +268,7 @@ class OracleTwoLevelTest(unittest.TestCase):
     def test_oracle_target_is_zero_at_option_end(self):
         gamma = 0.5
         deltas = [torch.tensor([1.0]), torch.tensor([2.0]), torch.tensor([3.0])]
-        option_ids = [0, 0, 1]
+        ended_flags = [False, True, False]
         running = torch.tensor([10.0])
         targets = [None] * len(deltas)
         for index in reversed(range(len(deltas))):
@@ -271,7 +276,7 @@ class OracleTwoLevelTest(unittest.TestCase):
                 running,
                 deltas[index],
                 gamma,
-                option_changes_after(option_ids, index),
+                ended_flags[index],
             )
             targets[index] = running.clone()
 
@@ -289,14 +294,65 @@ class OracleTwoLevelTest(unittest.TestCase):
 
     def test_option_return_uses_the_finished_option_value(self):
         gamma = 0.5
-        ended = option_segment_return_step(
-            torch.tensor([[99.0]]),
+        active = [False]
+        returns = [None]
+        ended = option_activation_returns(
+            active,
+            returns,
+            0,
             torch.tensor([[1.0]]),
             gamma,
-            True,
             torch.tensor([[8.0]]),
         )
         self.assertAlmostEqual(float(ended.item()), 1.0 + gamma * 8.0)
+
+    def test_paused_option_discounts_without_the_other_reward(self):
+        gamma = 0.5
+        returns = _walk_activation_returns(
+            [torch.tensor([[1.0]]), torch.tensor([[100.0]]), torch.tensor([[3.0]])],
+            [0, 1, 0],
+            gamma,
+            torch.tensor([[0.0]]),
+            [None, torch.tensor([[0.0]]), None],
+        )
+        self.assertAlmostEqual(float(returns[2].item()), 3.0)
+        self.assertAlmostEqual(float(returns[1].item()), 100.0)
+        self.assertAlmostEqual(
+            float(returns[0].item()), 1.0 + gamma * gamma * 3.0,
+        )
+
+    def test_activation_bootstrap_requires_a_plug_before_the_batch_tail(self):
+        with self.assertRaises(ValueError):
+            activation_bootstrap(0, 2, torch.tensor([[1.0]]), [None, None])
+
+    def test_oracle_activation_discounts_its_own_delta(self):
+        gamma = 0.5
+        deltas = [torch.tensor([1.0]), torch.tensor([10.0]), torch.tensor([3.0])]
+        returns = _walk_activation_returns(
+            deltas,
+            [0, 1, 0],
+            gamma,
+            torch.tensor([0.0]),
+            [None, torch.tensor([0.0]), None],
+        )
+        self.assertTrue(torch.equal(returns[2], torch.tensor([3.0])))
+        self.assertTrue(torch.equal(returns[1], torch.tensor([10.0])))
+        self.assertTrue(torch.equal(
+            returns[0], torch.tensor([1.0 + gamma * gamma * 3.0]),
+        ))
+
+    def test_zero_oracle_gamma_keeps_only_the_step_delta(self):
+        deltas = [torch.tensor([1.0]), torch.tensor([2.0]), torch.tensor([4.0])]
+        returns = _walk_activation_returns(
+            deltas,
+            [0, 1, 0],
+            0.0,
+            torch.tensor([9.0]),
+            [None, torch.tensor([8.0]), None],
+        )
+        self.assertTrue(torch.equal(returns[0], deltas[0]))
+        self.assertTrue(torch.equal(returns[1], deltas[1]))
+        self.assertTrue(torch.equal(returns[2], deltas[2]))
 
     def test_oracle_target_keeps_a_vector_shape_when_the_option_ends(self):
         ended = oracle_option_target(
@@ -308,6 +364,9 @@ class OracleTwoLevelTest(unittest.TestCase):
     def test_train_cuts_oracle_target_at_option_end(self):
         source = (Path(__file__).resolve().parents[1] / "src" / "train.py").read_text()
         self.assertIn("oracle_bootstrap = model_output[4].detach()", source)
+        self.assertIn("G_t = oracle_option_target(", source)
+        self.assertIn("player.option_end_oracle[i]", source)
+        self.assertNotIn("G_t = option_activation_returns(", source)
         self.assertIn("oracle_option_target(", source)
         self.assertIn("player.done and i + 1 == len(player.rewards)", source)
 
@@ -387,23 +446,32 @@ class OracleTwoLevelTest(unittest.TestCase):
         source = (Path(__file__).resolve().parents[1] / "src" / "train.py").read_text()
         self.assertIn("player.s1_states[i + 1] - player.s1_states[i]", source)
         self.assertIn("player.s2_states[i + 1] - player.s2_states[i]", source)
-        self.assertIn("player.s1_states[i + 1] - player.s1_states[i],\n                            args.gamma_oracle,", source)
-        self.assertIn("player.s2_states[i + 1] - player.s2_states[i],\n                            args.gamma_oracle2,", source)
+        self.assertIn(
+            "player.s1_states[i + 1] - player.s1_states[i],\n"
+            "                        args.gamma_oracle,",
+            source,
+        )
+        self.assertIn(
+            "player.s2_states[i + 1] - player.s2_states[i],\n"
+            "                        args.gamma_oracle2,",
+            source,
+        )
         self.assertIn(
             "cosine2, delta2, args.w_restoration_loss",
             source,
         )
 
-    def test_external_critic_runs_through_the_batch(self):
+    def test_external_critic_uses_option_activation(self):
         source = (Path(__file__).resolve().parents[1] / "src" / "train.py").read_text()
         player_source = (
             Path(__file__).resolve().parents[1] / "src" / "player_util.py"
         ).read_text()
-        self.assertIn("R = args.gamma * R + player.rewards[i]", source)
-        self.assertIn("R1 = player.option_end_values[i - 1]", source)
+        self.assertIn("player.option_end_values", source)
+        self.assertIn("player.option_end_intrinsic", source)
+        self.assertIn("player.option_end_oracle", source)
+        self.assertIn("activation_bootstrap(", source)
         self.assertIn("option_end_values[-1] = output[0].detach()", player_source)
-        self.assertIn("player.option_end_intrinsic, i, option_ended", source)
-        self.assertIn("player.option_end_oracle, i, option_ended", source)
+        self.assertNotIn("R1_critic", source)
         self.assertNotIn("gae_intrinsic = option_truncated_gae(", source)
         self.assertNotIn("delta_t_intrinsic = level1_option_delta(", source)
         self.assertIn("def _remember_finished_option(", player_source)
