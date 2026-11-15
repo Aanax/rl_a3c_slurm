@@ -1127,7 +1127,7 @@ class A3CRules2378OracleTwoLevel(A3CRules2378OracleNoSplitSharedDiffIntrinsicCri
 
         Args:
             shared: Shared encoder map, shape ``[B, 64, H, W]``.
-            option_onehot: Detached option one-hot, shape ``[B, num_options]``.
+            option_onehot: Detached option one-hot, shape ``[B, num_options]``. 0,1,0,0,0,0,0,0
 
         Returns:
             Predicted s1 change, shape ``[B, 64, H, W]``.

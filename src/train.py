@@ -246,10 +246,6 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                     # Clear s values for next games
                 player.model.s_values = []
 
-                # # Reset memory for models with memory when starting new episode
-                # if hasattr(player.model, 'reset_memory'):
-                #     player.model.reset_memory()
-
                 player.eps_len = 0
                 state = player.env.reset()
                 if gpu_id >= 0:
@@ -275,63 +271,29 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 R_intrinsic2 = torch.zeros(1, 1)
                 gae2 = torch.zeros(1, 1)
                 gae_intrinsic = torch.zeros(1, 1)
-            model_output = None
             oracle_bootstrap = None
             oracle2_bootstrap = None
-            w_intrinsic = 0.0
-            if isinstance(player.model, (
-                model.A3CRules2378OracleIntrinsicCritic,
-                model.A3CRules2378OracleFCIntrinsicCritic,
-                model._IntrinsicCriticMixin,
-            )):
-                w_intrinsic = 1.0
             if not player.done:
                 state = player.state
-                if isinstance(player.model, model.A3CRules2378OracleTwoLevel) and player.actions2:
-                    model_output = player.model(
-                        state.unsqueeze(0),
-                        player.hx,
-                        player.cx,
-                        option_index=player.actions2[-1],
-                    )
-                else:
-                    model_output = player.model(
-                        state.unsqueeze(0), player.hx, player.cx
-                    )
-                if isinstance(player.model, model._FutureSharedDiffTargetMixin):
-                    player.shared_states.append(model_output[-1].detach())
+                model_output = player.model(
+                    state.unsqueeze(0),
+                    player.hx,
+                    player.cx,
+                    option_index=player.actions2[-1],
+                )
                 value = model_output[0]
                 R = value.detach()
-                if isinstance(player.model, (model.A3CRules2378OracleIntrinsicCritic, model.A3CRules2378OracleFCIntrinsicCritic, model._IntrinsicCriticMixin)) and len(model_output) >= 6:
-                    R_intrinsic = model_output[5].detach()
-                    w_intrinsic = 1.0
-                else:
-                    R_intrinsic = value.detach()
-                    w_intrinsic = 0.0
-                # For hierarchical models, also get V2
-                if len(model_output) >= 8:
-                    value2 = model_output[6]
-                    R2 = value2.detach()
-                if isinstance(player.model, model.A3CRules2378OracleTwoLevel):
-                    oracle_bootstrap = model_output[4].detach()
-                    oracle2_bootstrap = model_output[-1].detach()
-                    player.s1_states.append(model_output[-3])
-                    player.s2_states.append(model_output[-2])
-                    R_intrinsic2 = model_output[-4].detach()
+                R_intrinsic = model_output[5].detach()
+                R2 = model_output[6].detach()
+                oracle_bootstrap = model_output[4].detach()
+                oracle2_bootstrap = model_output[-1].detach()
+                player.s1_states.append(model_output[-3])
+                player.s2_states.append(model_output[-2])
+                R_intrinsic2 = model_output[-4].detach()
             player.values.append(R)
             player.values_intrinsic.append(R_intrinsic)
-            # Check if model is hierarchical (has V2 and a2 outputs)
-            # If values2 was populated during action_train, model is hierarchical
-            is_hierarchical = len(player.values2) > 0
-            use_oracle_two_level = isinstance(
-                player.model, model.A3CRules2378OracleTwoLevel
-            )
-            if is_hierarchical:
-                # Append final R2 to match the final R we just appended
-                # If episode is done, R2 remains zeros (bootstrap value)
-                player.values2.append(R2)
-            if use_oracle_two_level:
-                player.values_intrinsic2.append(R_intrinsic2)
+            player.values2.append(R2)
+            player.values_intrinsic2.append(R_intrinsic2)
             policy_loss = 0
             value_loss = 0
             value_intrinsic_loss = 0
@@ -341,22 +303,19 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             value_loss2 = 0
             cosine_const_values = []
             
-            if args.w_restoration_loss > 0 and len(player.x_restoreds) > 0:
-                if oracle_bootstrap is None:
-                    G_t = torch.zeros_like(player.x_restoreds[-1])
-                else:
-                    G_t = oracle_bootstrap
             if len(player.rewards) > 0:
                 if len(player.s1_states) != len(player.rewards) + 1:
                     raise ValueError('s1 transitions are misaligned')
                 if len(player.s2_states) != len(player.rewards) + 1:
                     raise ValueError('s2 transitions are misaligned')
-            if args.w_restoration_loss > 0 and len(player.oracle2_preds) > 0:
+                if oracle_bootstrap is None:
+                    G_t = torch.zeros_like(player.x_restoreds[-1])
+                else:
+                    G_t = oracle_bootstrap
                 if oracle2_bootstrap is None:
                     G2 = torch.zeros_like(player.oracle2_preds[-1])
                 else:
                     G2 = oracle2_bootstrap
-            if len(player.rewards) > 0:
                 num_options = player.model.num_options
                 active_ext = [False] * num_options
                 returns_ext = [None] * num_options
@@ -381,124 +340,93 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 advantage = R1 - player.values[i]
                 value_loss = value_loss + 0.5 * advantage.pow(2)
 
-                # Generalized Advantage Estimataion 1
-                if args.delta_t_mode == 'advantage':
-                    delta_t = advantage.detach()
-                else:
-                    delta_t = (
-                        player.rewards[i]
-                        + args.gamma * player.values[i + 1].data
-                        - player.values[i].data
-                    )
+                delta_t = advantage.detach()
 
                 R2 = args.gamma2 * R2 + (1.0 - args.gamma) * R1
                 advantage2 = R2 - player.values2[i]
                 delta2 = advantage2.detach()
                 value_loss2 = value_loss2 + 0.5 * advantage2.pow(2)
 
-                # Intrinsic critic target (oracle reward).
-                if args.w_restoration_loss > 0 and len(player.x_restoreds) > 0:
-                    episode_ended = player.done and i + 1 == len(player.rewards)
-                    option_ended = (
-                        i + 1 < n_steps
-                        and option_id != _option_index(player.actions2[i + 1])
-                    )
-                    oracle_plug = None
-                    if option_ended:
-                        oracle_plug = player.option_end_oracle[i]
-                    G_t = oracle_option_target(
-                        G_t,
-                        player.s1_states[i + 1] - player.s1_states[i],
-                        args.gamma_oracle,
-                        option_ended or episode_ended,
-                        oracle_plug,
-                    )
+                episode_ended = player.done and i + 1 == len(player.rewards)
+                option_ended = (
+                    i + 1 < n_steps
+                    and option_id != _option_index(player.actions2[i + 1])
+                )
+                oracle_plug = None
+                if option_ended:
+                    oracle_plug = player.option_end_oracle[i]
+                G_t = oracle_option_target(
+                    G_t,
+                    player.s1_states[i + 1] - player.s1_states[i],
+                    args.gamma_oracle,
+                    option_ended or episode_ended,
+                    oracle_plug,
+                )
+                G_const = G_t.detach().view(-1)
 
-                    if getattr(player.model, 'predicts_shared_diff', False):
-                        G_const = G_t.detach().view(-1)
-                    elif args.relu_g_const:
-                        G_const = F.relu(G_t.detach().view(-1))
-                    else:
-                        G_const = G_t.detach().view(-1)
+                cosine_const = F.cosine_similarity(
+                    player.x_restoreds[i].detach().view(-1),
+                    G_const,
+                    dim=0
+                ).squeeze(0)
+                cosine_const_values.append(cosine_const.item())
+                oracle_r = (1.0 - args.gamma) * cosine_const
 
-                    cosine_const = F.cosine_similarity(
-                        player.x_restoreds[i].detach().view(-1),
-                        G_const,
-                        dim=0
-                    ).squeeze(0)
-                    cosine_const_values.append(cosine_const.item())
-                    oracle_r = (1.0 - args.gamma) * cosine_const
+                intrinsic_tail = None
+                if not active_int[option_id]:
+                    intrinsic_tail = activation_bootstrap(
+                        i, n_steps, intrinsic_batch_tail,
+                        player.option_end_intrinsic,
+                    )
+                R_intrinsic = option_activation_returns(
+                    active_int, returns_int, option_id,
+                    oracle_r, args.gamma, intrinsic_tail,
+                )
+                intrinsic_advantage = R_intrinsic - player.values_intrinsic[i]
+                value_intrinsic_loss = value_intrinsic_loss + 0.5 * intrinsic_advantage.pow(2)
 
-                    intrinsic_tail = None
-                    if not active_int[option_id]:
-                        intrinsic_tail = activation_bootstrap(
-                            i, n_steps, intrinsic_batch_tail,
-                            player.option_end_intrinsic,
-                        )
-                    R_intrinsic = option_activation_returns(
-                        active_int, returns_int, option_id,
-                        oracle_r, args.gamma, intrinsic_tail,
-                    )
-                    intrinsic_advantage = R_intrinsic - player.values_intrinsic[i]
-                    value_intrinsic_loss = value_intrinsic_loss + 0.5 * intrinsic_advantage.pow(2)
+                delta_t_intrinsic = intrinsic_advantage.detach()
 
-                    if args.delta_t_mode == 'advantage':
-                        delta_t_intrinsic = intrinsic_advantage.detach() * w_intrinsic
-                    else:
-                        delta_t_intrinsic = (
-                            oracle_r
-                            + args.gamma * player.values_intrinsic[i + 1].data
-                            - player.values_intrinsic[i].data
-                        ) * w_intrinsic
+                cosine_restoreds = -F.cosine_similarity(
+                    player.x_restoreds[i].view(-1),
+                    G_const,
+                    dim=0,
+                )
+                restoration_loss = restoration_loss + external_advantage_restoration(
+                    cosine_restoreds, delta_t + delta2, args.w_restoration_loss
+                )
 
-                    cosine_restoreds = -F.cosine_similarity(
-                        player.x_restoreds[i].view(-1),
-                        G_const,
-                        dim=0,
-                    )
-                    restoration_loss = restoration_loss + external_advantage_restoration(
-                        cosine_restoreds, delta_t + delta2, args.w_restoration_loss
-                    )
-                else:
-                    delta_t_intrinsic = 0.0
+                batch_ended = player.done and i + 1 == len(player.rewards)
+                G2 = oracle_option_target(
+                    G2,
+                    player.s2_states[i + 1] - player.s2_states[i],
+                    args.gamma_oracle2,
+                    batch_ended,
+                )
+                cosine2 = -F.cosine_similarity(
+                    player.oracle2_preds[i].view(-1),
+                    G2.detach().view(-1),
+                    dim=0,
+                )
+                restoration_loss = restoration_loss + external_advantage_restoration(
+                    cosine2, delta2, args.w_restoration_loss,
+                )
+                cosine_const2 = F.cosine_similarity(
+                    player.oracle2_preds[i].detach().view(-1),
+                    G2.detach().view(-1),
+                    dim=0,
+                ).squeeze(0)
+                oracle_r2 = (1.0 - args.gamma2) * cosine_const2
+                R_intrinsic2 = level2_batch_return_step(
+                    R_intrinsic2, oracle_r2, args.gamma2,
+                )
+                advantage_intrinsic2 = R_intrinsic2 - player.values_intrinsic2[i]
+                value_intrinsic2_loss = (
+                    value_intrinsic2_loss + 0.5 * advantage_intrinsic2.pow(2)
+                )
 
-                advantage_intrinsic2 = torch.zeros_like(advantage2)
-                if args.w_restoration_loss > 0 and len(player.oracle2_preds) > i:
-                    batch_ended = player.done and i + 1 == len(player.rewards)
-                    G2 = oracle_option_target(
-                        G2,
-                        player.s2_states[i + 1] - player.s2_states[i],
-                        args.gamma_oracle2,
-                        batch_ended,
-                    )
-                    cosine2 = -F.cosine_similarity(
-                        player.oracle2_preds[i].view(-1),
-                        G2.detach().view(-1),
-                        dim=0,
-                    )
-                    restoration_loss = restoration_loss + external_advantage_restoration(
-                        cosine2, delta2, args.w_restoration_loss,
-                    )
-                    cosine_const2 = F.cosine_similarity(
-                        player.oracle2_preds[i].detach().view(-1),
-                        G2.detach().view(-1),
-                        dim=0,
-                    ).squeeze(0)
-                    oracle_r2 = (1.0 - args.gamma2) * cosine_const2
-                    R_intrinsic2 = level2_batch_return_step(
-                        R_intrinsic2, oracle_r2, args.gamma2,
-                    )
-                    advantage_intrinsic2 = R_intrinsic2 - player.values_intrinsic2[i]
-                    value_intrinsic2_loss = (
-                        value_intrinsic2_loss + 0.5 * advantage_intrinsic2.pow(2)
-                    )
-
-                if args.delta_t_mode == 'advantage':
-                    gae = delta_t
-                    gae_intrinsic = delta_t_intrinsic
-                elif args.delta_t_mode == 'td':
-                    gae = gae * args.gamma * args.tau + delta_t
-                    gae_intrinsic = gae_intrinsic * args.gamma * args.tau + delta_t_intrinsic
+                gae = delta_t
+                gae_intrinsic = delta_t_intrinsic
                 policy1_i, policy2_i = oracle_two_level_actor_loss(
                     player.log_probs[i],
                     gae_intrinsic,
@@ -512,10 +440,6 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 policy_loss2 = policy_loss2 + policy2_i
 
             kld_loss = 0
-            if args.w_kld_loss > 0:
-                for i in range(len(player.rewards)):
-                    if len(player.kls) > i:
-                        kld_loss += args.w_kld_loss * player.kls[i]
 
             value_loss = value_loss + value_loss2
             value_intrinsic_loss = value_intrinsic_loss + value_intrinsic2_loss
@@ -540,13 +464,6 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
             if getattr(player.model, 'memdiff_sum', None) is not None:
                 player.model.memdiff_sum = player.model.memdiff_sum.detach()
 
-            # Reset memory for models with memory when starting new batch
-            if hasattr(player.model, 'reset_memory'):
-                player.model.reset_memory()
-
-            if hasattr(shared_model, 'orthogonalize_conv4'):
-                shared_model.orthogonalize_conv4()
-
             if args.save_model_steps > 0 and frames_total.value // args.save_model_steps > last_save and rank == 0:
                 last_save = frames_total.value // args.save_model_steps
                 log_dir_path = f"{args.log_dir}{args.experiment_name}/"
@@ -554,8 +471,9 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                 torch.save(shared_model.state_dict(), f"{log_dir_path}model_{frames_total.value}.dat")
 
             # Save losses to CSV if monitoring is enabled
-            if args.monitor_losses:
+            if args.monitor_losses or args.monitor_cosine_const:
                 batch_count += 1
+            if args.monitor_losses:
                 with open(loss_csv_path, 'a', newline='') as csvfile:
                     writer = csv.writer(csvfile)
                     writer.writerow([
@@ -566,8 +484,6 @@ def train(rank, args, shared_model, optimizer, env_conf, frames_total):
                         restoration_loss.item() if isinstance(restoration_loss, torch.Tensor) else restoration_loss,
                         (0.5 * value_intrinsic_loss).item() if isinstance(value_intrinsic_loss, torch.Tensor) else 0.5 * value_intrinsic_loss,
                     ])
-            elif args.monitor_cosine_const:
-                batch_count += 1
 
             if args.monitor_cosine_const:
                 with open(cosine_csv_path, 'a', newline='') as csvfile:

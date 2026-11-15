@@ -448,12 +448,12 @@ class OracleTwoLevelTest(unittest.TestCase):
         self.assertIn("player.s2_states[i + 1] - player.s2_states[i]", source)
         self.assertIn(
             "player.s1_states[i + 1] - player.s1_states[i],\n"
-            "                        args.gamma_oracle,",
+            "                    args.gamma_oracle,",
             source,
         )
         self.assertIn(
             "player.s2_states[i + 1] - player.s2_states[i],\n"
-            "                        args.gamma_oracle2,",
+            "                    args.gamma_oracle2,",
             source,
         )
         self.assertIn(

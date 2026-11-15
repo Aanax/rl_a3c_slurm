@@ -27,6 +27,8 @@ Output format (saved as .npy files):
     rewards.npy - Rewards (N,)
     Vs.npy - Level 1 values (N, 1)
     Vs2.npy - Level 2 values (N, 1)
+    Vs_intrinsic.npy - Level 1 intrinsic critic (N, 1), two-level models
+    Vs_intrinsic2.npy - Level 2 intrinsic critic (N, 1), two-level models
     ss.npy - Level 1 encoder features (N, 64, 4, 4)
 """
 
@@ -208,6 +210,8 @@ def run_evaluation(net, env, args):
         rewards = []  # Rewards received
         Vs = []  # Level 1 values
         Vs2 = []  # Level 2 values
+        Vs_intrinsic = []  # Level 1 intrinsic critic
+        Vs_intrinsic2 = []  # Level 2 intrinsic critic
         x_restoreds = []  # Oracle decoder outputs
         
         reward_sum = 0
@@ -232,10 +236,14 @@ def run_evaluation(net, env, args):
             a2_logits = None
             x_restored = None
             option_index = None
+            V_intrinsic = None
+            V_intrinsic2 = None
             if isinstance(net, model_module.A3CRules2378OracleTwoLevel):
                 V2 = model_output[6]
                 a2_logits = model_output[7]
                 option_index = model_output[8]
+                V_intrinsic = model_output[5]
+                V_intrinsic2 = model_output[9]
             elif isinstance(net, oracle_types):
                 x_restored = model_output[4]
             else:
@@ -261,6 +269,10 @@ def run_evaluation(net, env, args):
 # Level 2 logits (16-dim)
             if V2 is not None:
                 Vs2.append(V2.cpu().numpy()[0])  # Level 2 value
+            if V_intrinsic is not None:
+                Vs_intrinsic.append(V_intrinsic.cpu().numpy()[0])
+            if V_intrinsic2 is not None:
+                Vs_intrinsic2.append(V_intrinsic2.cpu().numpy()[0])
             if x_restored is not None:
                 x_restoreds.append(x_restored.cpu().numpy()[0])
             
@@ -297,6 +309,10 @@ def run_evaluation(net, env, args):
             episode_data['Q22s'] = np.array(Q22s)
         if len(Vs2) > 0:
             episode_data['Vs2'] = np.array(Vs2)
+        if len(Vs_intrinsic) > 0:
+            episode_data['Vs_intrinsic'] = np.array(Vs_intrinsic)
+        if len(Vs_intrinsic2) > 0:
+            episode_data['Vs_intrinsic2'] = np.array(Vs_intrinsic2)
         if len(x_restoreds) > 0:
             episode_data['x_restoreds'] = np.array(x_restoreds)
         

@@ -181,36 +181,9 @@ class SharedFutureDeltaOracleTest(unittest.TestCase):
 
         train_path = os.path.join(os.path.dirname(__file__), '..', 'src', 'train.py')
         with open(train_path) as train_file:
-            tree = ast.parse(train_file.read())
-        bootstrap = next(
-            node for node in ast.walk(tree) if isinstance(node, ast.If)
-            and isinstance(node.test, ast.UnaryOp)
-            and isinstance(node.test.op, ast.Not)
-            and isinstance(node.test.operand, ast.Attribute)
-            and node.test.operand.attr == 'done'
-            and any(isinstance(child, ast.If) for child in node.body)
-        )
-        block = compile(ast.Module(body=bootstrap.body[:3]), train_path, 'exec')
-        player = SimpleNamespace(
-            done=False, state=agent.state, hx=agent.hx, cx=agent.cx,
-            model=sequence_model, shared_states=agent.shared_states,
-        )
-        scope = {'model': model, 'player': player}
-        exec(block, scope)
-        self.assertEqual(len(scope['model_output']), 6)
-        self.assertEqual(
-            [state[0, 0, 0, 0].item() for state in agent.shared_states],
-            [1.0, 2.0, 3.0],
-        )
-        self.assertEqual(sequence_model.forward_calls, 3)
-        self.assertEqual(sequence_model.terminal_calls, 0)
-
-        legacy_player = SimpleNamespace(
-            done=False, state=agent.state, hx=agent.hx, cx=agent.cx,
-            model=_LegacyOracleModel(), shared_states=[],
-        )
-        exec(block, {'model': model, 'player': legacy_player})
-        self.assertEqual(legacy_player.shared_states, [])
+            source = train_file.read()
+        self.assertIn('option_index=player.actions2[-1]', source)
+        self.assertNotIn('_FutureSharedDiffTargetMixin', source)
 
     def test_terminal_shared_transition_uses_terminal_encoder_once(self):
         sequence_model = _SequenceTargetModel()
