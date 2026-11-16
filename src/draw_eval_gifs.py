@@ -5,7 +5,7 @@ This script downloads evaluation artifacts from a remote server (paramiko SFTP b
 default; OpenSSH rsync with --rsync for hosts that need ssh-rsa),
 then creates two MP4 videos:
   1. actions.mp4 - Configurable panels (max 4) overlaid on frames
-  2. VS_short.mp4 - Shows V1, V2 values and rewards over time
+  2. VS_short.mp4 - Intrinsic critics, external critics, and the played option
 
 Usage:
     python src/draw_eval_gifs.py EVAL_FOLDER_NAME [options]
@@ -144,7 +144,14 @@ def resolve_action_legend(n_actions, actions_arg='auto'):
 
 
 def _as_col(arr):
-    """Squeeze and reshape to (N, 1) for single-series panels."""
+    """Squeeze and reshape to (N, 1) for single-series panels.
+
+    Args:
+        arr: Array of one critic over time.
+
+    Returns:
+        Column array of shape (N, 1).
+    """
     flat = np.squeeze(arr)
     if flat.ndim == 0:
         flat = flat.reshape(1)
@@ -346,6 +353,7 @@ def _openssh_rsync_rsh(username, pkey_path):
         "ssh",
         "-o", "HostKeyAlgorithms=+ssh-rsa",
         "-o", "PubkeyAcceptedAlgorithms=+ssh-rsa",
+        "-o", "ClearAllForwardings=yes",
     ]
     pkey_path = os.path.expanduser(pkey_path) if pkey_path else ""
     if pkey_path and os.path.isfile(pkey_path):
@@ -449,7 +457,8 @@ def download_eval_files_paramiko(eval_folder, local_dir, server, username, remot
         'Q11s.npy', 'Q22s.npy', 'Q21s.npy', 'aas.npy', 'oos.npy',
         'betas.npy', 'beta_logits.npy', 'beta_active.npy', 'beta_samples.npy',
         'beta2s.npy', 'terminated1s.npy', 'terminated2s.npy',
-        'Frames_normalized_orig.npy', 'Vs.npy', 'Vs2.npy',
+        'Frames_normalized_orig.npy',
+        'Vs_intrinsic2.npy', 'Vs_intrinsic.npy', 'Vs2.npy', 'Vs.npy',
         'rewards.npy', 'gs2.npy', 'gs1.npy', 'ss.npy', 'ss2.npy'
     ]
 
@@ -537,6 +546,8 @@ def load_eval_data(eval_folder, local_dir):
         ('Q22s.npy', 'Q_ext'),
         ('aas.npy', 'action'),
         ('oos.npy', 'option'),
+        ('Vs_intrinsic2.npy', 'Vs_intrinsic2'),
+        ('Vs_intrinsic.npy', 'Vs_intrinsic'),
         ('Vs2.npy', 'Vs2'),
         ('Vs.npy', 'Vs'),
         ('rewards.npy', 'rewards'),
@@ -814,46 +825,107 @@ def create_action_gif(
     del dd
 
 
-def create_values_gif(data, eval_folder, output_dir, fps=3, start_idx=0, stop_idx=300, window_size=34):
+def _critic_pair_panel(level1, level2, labels):
+    """Stack two critic series into one plot panel.
+
+    Args:
+        level1: First series, or None.
+        level2: Second series, or None.
+        labels: Names for level 1 and level 2.
+
+    Returns:
+        Panel dict, or None when both series are missing.
     """
-    Create values visualization GIF showing V1, V2 and rewards.
+    columns = []
+    legend = []
+    if level1 is not None:
+        columns.append(_as_col(level1))
+        legend.append(labels[0])
+    if level2 is not None:
+        columns.append(_as_col(level2))
+        legend.append(labels[1])
+    if not columns:
+        return None
+    return {'value': np.hstack(columns), 'legend': legend}
+
+
+def _option_panel(data):
+    """Panel of the option index played at each step.
+
+    Args:
+        data: Loaded eval arrays. Uses ``option`` and, when present, ``Q_ext``.
+
+    Returns:
+        Panel dict, or None when the option series is missing.
+    """
+    options = data.get('option')
+    if options is None:
+        return None
+    options_flat = _as_col(options)
+    logits2 = data.get('Q_ext')
+    if logits2 is not None and logits2.ndim > 1:
+        n_options = logits2.shape[1]
+    elif options_flat.size:
+        n_options = int(np.max(options_flat)) + 1
+    else:
+        n_options = 1
+    return {
+        'value': options_flat,
+        'legend': ['option'],
+        'ylim': (-0.5, max(n_options - 0.5, 0.5)),
+        'plot_style': 'dots',
+        'markersize': 7,
+    }
+
+
+def _critic_values_dict(data):
+    """Three panels: intrinsic critics, external critics, and the played option.
+
+    Args:
+        data: Loaded eval arrays.
+
+    Returns:
+        Ordered plot dict for ``VS_short``.
+    """
+    values_dict = {}
+    intrinsic_panel = _critic_pair_panel(
+        data.get('Vs_intrinsic'), data.get('Vs_intrinsic2'), ('V_int1', 'V_int2'),
+    )
+    external_panel = _critic_pair_panel(
+        data.get('Vs'), data.get('Vs2'), ('V1', 'V2'),
+    )
+    option_panel = _option_panel(data)
+    if intrinsic_panel is not None:
+        values_dict['intrinsic'] = intrinsic_panel
+    if external_panel is not None:
+        values_dict['external'] = external_panel
+    if option_panel is not None:
+        values_dict['option'] = option_panel
+    return values_dict
+
+
+def create_values_gif(data, eval_folder, output_dir, fps=3, start_idx=0, stop_idx=300, window_size=34):
+    """Write ``VS_short.mp4`` with intrinsic critics, external critics, and the option.
+
+    Args:
+        data: Loaded eval arrays, including frames.
+        eval_folder: Name used in the figure title.
+        output_dir: Directory for ``VS_short.mp4``.
+        fps: Frames per second.
+        start_idx: First frame to draw.
+        stop_idx: Frame index at which drawing stops.
+        window_size: Number of steps visible in each plot.
     """
     print("\n[draw] Creating values visualization...")
-    
+
     frames = data['frames']
-    Vs = data.get('Vs', None)
-    Vs2 = data.get('Vs2', None)
-    rewards = data.get('rewards', None)
-    
-    if Vs is not None:
-        print(f"[draw] Vs shape: {Vs.shape}, range: [{np.min(Vs):.2f}, {np.max(Vs):.2f}]")
-        # Expand dims if needed
-        if len(Vs.shape) == 1:
-            Vs = np.expand_dims(Vs, axis=1)
-    if Vs2 is not None:
-        print(f"[draw] Vs2 shape: {Vs2.shape}, range: [{np.min(Vs2):.2f}, {np.max(Vs2):.2f}]")
-        if len(Vs2.shape) == 1:
-            Vs2 = np.expand_dims(Vs2, axis=1)
-    if rewards is not None:
-        print(f"[draw] Rewards shape: {rewards.shape}")
-        print(f"[draw] Reward stats: mean={np.mean(rewards):.2f}, max={np.max(rewards):.2f}, min={np.min(rewards):.2f}")
-    
-    # Build values dict
-    values_dict = {}
-    
-    # Combine V1 and V2 with clear labels
-    if Vs is not None and Vs2 is not None:
-        values_dict['V1_and_V2'] = {
-            'value': np.hstack([Vs, Vs2]),
-            'legend': ["V1 (level1)", "V2 (level2)"]
-        }
-    elif Vs is not None:
-        values_dict['V1 (level1)'] = {'value': Vs}
-    elif Vs2 is not None:
-        values_dict['V2 (level2)'] = {'value': Vs2}
-    
-    if rewards is not None:
-        values_dict['reward'] = {'value': rewards}
+    values_dict = _critic_values_dict(data)
+    for name, panel in values_dict.items():
+        series = panel['value']
+        print(
+            f"[draw] {name} shape: {series.shape}, "
+            f"range: [{np.min(series):.2f}, {np.max(series):.2f}]"
+        )
     
     # Create frames
     dd = draw_frames_with_info(
@@ -865,8 +937,7 @@ def create_values_gif(data, eval_folder, output_dir, fps=3, start_idx=0, stop_id
         WINDOWSIZE=window_size
     )
     
-    # Crop if needed (based on original code)
-    CROP_BELOW = 1450
+    CROP_BELOW = 1750
     dd = [k[:CROP_BELOW] for k in dd]
     
     # Save
