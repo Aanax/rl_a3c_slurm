@@ -1,35 +1,30 @@
 """
-eval.py — Evaluation script for Hierarchial models (Hierarchial, Hierarchial_memory, Hierarchial_memory_memrelu).
+eval.py — play a saved model greedily and save what it did, for draw_eval_gifs.py.
 
-Runs a greedy policy rollout, saves level1 logits, level2 logits, actions, rewards, 
-values1, values2, and normalized frames in a format compatible with the drawing tools.
+The model is put in eval mode: both the option and the game action are the most
+likely ones. An episode ends when a life is lost.
 
 Usage (local):
     python src/eval.py \\
-        --config configs/run_config_our.ini \\
-        --model-path trained_models/PongNoFrameskip-v4.dat \\
+        --config configs/run_config_oracle_two_level_memory_h8_h64_n2.ini \\
+        --model-path logs/<experiment>/models/p0/best_steps..._score....dat \\
         --output-dir ./eval_output \\
         --num-episodes 1
 
-Usage (cluster - outputs to logs/ folder):
-    python src/eval.py \\
-        --config configs/run_config_our.ini \\
-        --model-path trained_models/PongNoFrameskip-v4.dat \\
-        --num-episodes 1 \\
-        --on-cluster
+Usage (cluster - outputs to logs/<experiment_name>/Eval_.../):
+    python src/eval.py --config <config> --model-path <weights> --on-cluster
 
-Output format (saved as .npy files):
-    Frames_normalized_orig.npy - Preprocessed frames (N, C, H, W)
-    Q11s.npy - Level 1 logits (N, num_actions)
-    Q22s.npy - Level 2 logits (N, num_options)
-    aas.npy - Selected actions (N, 1)
-    oos.npy - Option index played at each step (N, 1), two-level models
-    rewards.npy - Rewards (N,)
-    Vs.npy - Level 1 values (N, 1)
-    Vs2.npy - Level 2 values (N, 1)
-    Vs_intrinsic.npy - Level 1 intrinsic critic (N, 1), two-level models
-    Vs_intrinsic2.npy - Level 2 intrinsic critic (N, 1), two-level models
-    ss.npy - Level 1 encoder features (N, 64, 4, 4)
+Output files (.npy, N = number of steps):
+    Frames_normalized_orig  frames the model saw        (N, 1, 80, 80)
+    ss                      level-1 features s1          (N, 1, 64, 4, 4)
+    Q11s                    level-1 action logits        (N, num_actions)
+    Q22s                    level-2 option logits        (N, num_options)
+    aas                     game action played           (N, 1)
+    oos                     option played                (N, 1)
+    rewards                 rewards                      (N,)
+    Vs, Vs2                 external critics, level 1/2  (N, 1)
+    Vs_intrinsic, Vs_intrinsic2
+                            intrinsic critics, level 1/2 (N, 1)
 """
 
 from __future__ import print_function, division
@@ -45,322 +40,149 @@ import datetime
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 
-# Path setup
 _SRC_DIR = os.path.dirname(os.path.abspath(__file__))
-_ROOT_DIR = os.path.dirname(_SRC_DIR)
 sys.path.insert(0, _SRC_DIR)
 
 import model as model_module
 from environment import atari_env
-from player_util import Agent
 
 
 def parse_args():
-    """Parse CLI flags and merge with the .ini run-config."""
-    p = argparse.ArgumentParser(
-        description='Evaluation script for Hierarchial models'
-    )
-    p.add_argument('--config', required=True,
-                   help='Path to .ini run config (e.g. configs/run_config_our.ini)')
-    p.add_argument('--model-path', required=True,
-                   help='Path to .dat/.pth weights checkpoint')
-    p.add_argument('--num-episodes', type=int, default=1,
-                   help='Number of episodes to evaluate (default: 1)')
-    p.add_argument('--output-dir', default=None,
-                   help='Output directory for eval files (default: auto-generated)')
-    p.add_argument('--on-cluster', action='store_true',
-                   help='Running on cluster - save to logs/ folder with proper naming')
-    p.add_argument('--gpu-id', type=int, default=-1,
-                   help='GPU to use [-1 CPU only] (default: -1)')
-    p.add_argument('--max-episode-length', type=int, default=10000,
-                   help='Maximum episode length (default: 10000)')
-    p.add_argument('--render', action='store_true',
-                   help='Render gameplay (default: False)')
-    p.add_argument('--render-freq', type=int, default=1,
-                   help='Frequency to render (default: 1)')
-    
+    """Read the command line and the .ini run config."""
+    p = argparse.ArgumentParser(description='Evaluate a two-level oracle model with memory')
+    p.add_argument('--config', required=True, help='Path to the .ini run config')
+    p.add_argument('--model-path', required=True, help='Path to the .dat weights')
+    p.add_argument('--num-episodes', type=int, default=1, help='Number of episodes (default: 1)')
+    p.add_argument('--output-dir', default=None, help='Output directory (default: auto-generated)')
+    p.add_argument('--on-cluster', action='store_true', help='Save to logs/<experiment_name>/')
+    p.add_argument('--max-episode-length', type=int, default=10000, help='Max steps per episode')
+    p.add_argument('--render', action='store_true', help='Also save an mp4 of the game')
+    p.add_argument('--render-freq', type=int, default=1, help='Render every N-th episode')
     cli = p.parse_args()
 
-    # Read .ini config
     cfg = configparser.ConfigParser()
     cfg.read(cli.config)
+    c = cfg['DEFAULT']
 
     args = argparse.Namespace()
-
-    # Model and environment parameters from config
-    args.env = cfg.get('DEFAULT', 'env', fallback='PongNoFrameskip-v4')
-    args.hidden_size = cfg.getint('DEFAULT', 'hidden_size', fallback=1024)
-    args.gamma = cfg.getfloat('DEFAULT', 'gamma', fallback=0.9)
-    args.gamma_memory = cfg.getfloat('DEFAULT', 'gamma_memory', fallback=0.9)
-    args.gamma2 = cfg.getfloat('DEFAULT', 'gamma2', fallback=0.99)
-    args.tau = cfg.getfloat('DEFAULT', 'tau', fallback=1.0)
-    args.skip_rate = cfg.getint('DEFAULT', 'skip_rate', fallback=4)
+    args.env = c.get('env')
+    args.env_config = c.get('env_config')
+    args.experiment_name = c.get('experiment_name')
+    args.num_options = c.getint('num_options')
+    args.skip_rate = c.getint('skip_rate')
+    args.normalization_alpha = c.getfloat('normalization_alpha')
     args.max_episode_length = cli.max_episode_length
-    args.input_normalization_class = cfg.get('DEFAULT', 'input_normalization_class', fallback='NormalizedEnv')
-    args.model_type = cfg.get('DEFAULT', 'model_type', fallback='Hierarchial')
-    args.experiment_name = cfg.get('DEFAULT', 'experiment_name', fallback='eval')
-    args.num_options = cfg.getint('DEFAULT', 'num_options', fallback=8)
-    args.actor_input_mode = cfg.get('DEFAULT', 'actor_input_mode', fallback='shared')
-    args.critic_input_mode = cfg.get('DEFAULT', 'critic_input_mode', fallback='shared')
-    args.env_config = cfg.get('DEFAULT', 'env_config', fallback='configs/envs_config.json')
-    args.normalization_alpha = cfg.getfloat('DEFAULT', 'normalization_alpha', fallback=0.9999)
-    args.monitor_s = False
-    args.use_rmsnorm = cfg.getboolean('DEFAULT', 'use_rmsnorm', fallback=False)
-    
-    gpu_str = cfg.get('DEFAULT', 'gpu_ids', fallback='-1')
-    cfg_gpu_ids = [int(x.strip()) for x in gpu_str.split(',') if x.strip()]
-    args.gpu_ids = [cli.gpu_id] if cli.gpu_id >= 0 else cfg_gpu_ids
 
-    # Eval-specific settings
     args.model_path = cli.model_path
     args.num_episodes = cli.num_episodes
     args.output_dir = cli.output_dir
     args.on_cluster = cli.on_cluster
     args.render = cli.render
     args.render_freq = cli.render_freq
-    args.gpu_id = cli.gpu_id
-
     return args
 
 
 def load_model_and_env(args):
-    """Instantiate the Atari environment and load model weights."""
-    env_conf = json.load(open(args.env_config))
+    """Create the game and the model, and load the weights."""
+    with open(args.env_config) as f:
+        env_conf = json.load(f)
     env_key = args.env.split('-')[0].replace('NoFrameskip', '').replace('Deterministic', '')
     conf = env_conf.get(env_key, env_conf['Default'])
 
-    # Suppress atari_env's startup prints
-    with contextlib.redirect_stdout(io.StringIO()):
+    with contextlib.redirect_stdout(io.StringIO()):  # hide atari_env's prints
         env = atari_env(args.env, conf, args)
 
-    num_inputs = env.observation_space.shape[0]
-
-    model_cls = getattr(model_module, args.model_type)
-    net = model_cls(num_inputs, env.action_space, args)
-    
-    # Load weights
-    state_dict = torch.load(args.model_path, map_location='cpu')
-    net.load_state_dict(state_dict)
+    net = model_module.A3CRules2378OracleTwoLevelMemory(
+        env.observation_space.shape[0], env.action_space, args
+    )
+    net.load_state_dict(torch.load(args.model_path, map_location='cpu'))
     net.eval()
 
-    # Move to GPU if requested
-    gpu_id = args.gpu_id
-    if gpu_id >= 0:
-        with torch.cuda.device(gpu_id):
-            net = net.cuda()
-
-    print(f"[eval] Model       : {args.model_type}")
-    print(f"[eval] Env         : {args.env} (num_inputs={num_inputs})")
+    print(f"[eval] Env         : {args.env}")
     print(f"[eval] Actions     : {env.action_space.n}")
+    print(f"[eval] Options     : {args.num_options}")
     print(f"[eval] Weights     : {args.model_path}")
-    print(f"[eval] GPU         : {gpu_id if gpu_id >= 0 else 'CPU'}")
-
     return net, env
 
 
-def _reset_model_memory(net):
-    """Reset model internal memory if applicable."""
-    if hasattr(net, 'running_mem'):
-        net.running_mem = torch.zeros((1, 64, 4, 4))
-    if hasattr(net, 'prev_x_conv'):
-        net.prev_x_conv = None
-    if hasattr(net, 'prev_shared'):
-        net.prev_shared = None
-    if hasattr(net, 'memdiff_sum'):
-        net.memdiff_sum = None
-        net.memdiff_count = 0
-
-
 def run_evaluation(net, env, args):
-    """
-    Run evaluation episode(s) and collect all relevant data.
-    
-    Returns dictionaries with collected data for each episode.
-    """
-    gpu_id = args.gpu_id
-    oracle_types = (
-        model_module.A3CRules2378Oracle,
-        model_module.A3CRules2378OracleFC,
-        model_module.A3CRules2378OracleIntrinsicCritic,
-        model_module.A3CRules2378OracleFCIntrinsicCritic,
-        model_module.A3CRules2378OracleSplitEncoders,
-        model_module.A3CRules2378OracleSplitEncodersIntrinsicCritic,
-        model_module.A3CRules2378OracleNoSplitEncoders,
-    )
-    
+    """Play the episodes and collect everything the drawing tools need."""
     all_episodes_data = []
-    
+
     for episode_idx in range(args.num_episodes):
         print(f"\n[eval] Episode {episode_idx + 1}/{args.num_episodes}")
-        
-        # Reset environment and model memory
         obs = env.reset()
-        _reset_model_memory(net)
-        
-        # Initialize tracking lists
-        frames_normalized_orig = []
+        previous_s1 = None   # memory starts empty
+
+        record = {
+            'Frames_normalized_orig': [], 'ss': [], 'Q11s': [], 'Q22s': [],
+            'aas': [], 'oos': [], 'rewards': [],
+            'Vs': [], 'Vs2': [], 'Vs_intrinsic': [], 'Vs_intrinsic2': [],
+        }
         frames_render = []
-        ss = []  # Level 1 encoder features
-        Q11s = []  # Level 1 logits
-        Q22s = []  # Level 2 logits
-        aas = []  # Actions taken
-        oos = []  # Option index played
-        rewards = []  # Rewards received
-        Vs = []  # Level 1 values
-        Vs2 = []  # Level 2 values
-        Vs_intrinsic = []  # Level 1 intrinsic critic
-        Vs_intrinsic2 = []  # Level 2 intrinsic critic
-        x_restoreds = []  # Oracle decoder outputs
-        
         reward_sum = 0
         step_count = 0
         done = False
-        
+
         while not done and step_count < args.max_episode_length:
-            # Prepare observation tensor
-            obs_t = torch.FloatTensor(obs).unsqueeze(0)  # (1, C, H, W)
-            if gpu_id >= 0:
-                with torch.cuda.device(gpu_id):
-                    obs_t = obs_t.cuda()
-            
-            # Forward pass through model
             with torch.no_grad():
-                model_output = net(obs_t, torch.zeros(1), torch.zeros(1))
-            
-            # Parse model output: (V1, a1, hx, cx, None, None, V2, a2_logits)
-            V1 = model_output[0]
-            a1_logits = model_output[1]
-            V2 = None
-            a2_logits = None
-            x_restored = None
-            option_index = None
-            V_intrinsic = None
-            V_intrinsic2 = None
-            if isinstance(net, model_module.A3CRules2378OracleTwoLevel):
-                V2 = model_output[6]
-                a2_logits = model_output[7]
-                option_index = model_output[8]
-                V_intrinsic = model_output[5]
-                V_intrinsic2 = model_output[9]
-            elif isinstance(net, oracle_types):
-                x_restored = model_output[4]
-            else:
-                # Default: treat non-oracle models as hierarchical-style outputs.
-                V2 = model_output[6]
-                a2_logits = model_output[7]
-            
-            # Get action probabilities and select action (greedy)
-            prob = F.softmax(a1_logits, dim=1)
-            action = prob.cpu().numpy().argmax(axis=1)[0]
-            
-            # Store data
-            frames_normalized_orig.append(obs.copy())
-            ss.append(net.s_values[-1].cpu().numpy() if hasattr(net, 's_values') and net.s_values 
-                      else torch.zeros(1, 64, 4, 4).numpy())  # Level 1 features
-            Q11s.append(a1_logits.cpu().numpy()[0])  # Level 1 logits
-            if a2_logits is not None:
-                Q22s.append(a2_logits.cpu().numpy()[0])  
-            aas.append([action])  # Action taken
-            if option_index is not None:
-                oos.append([int(option_index.detach().view(-1)[0].item())])
-            Vs.append(V1.cpu().numpy()[0])  # Level 1 value
-# Level 2 logits (16-dim)
-            if V2 is not None:
-                Vs2.append(V2.cpu().numpy()[0])  # Level 2 value
-            if V_intrinsic is not None:
-                Vs_intrinsic.append(V_intrinsic.cpu().numpy()[0])
-            if V_intrinsic2 is not None:
-                Vs_intrinsic2.append(V_intrinsic2.cpu().numpy()[0])
-            if x_restored is not None:
-                x_restoreds.append(x_restored.cpu().numpy()[0])
-            
-            # Render if requested
+                out = net(torch.FloatTensor(obs).unsqueeze(0), previous_s1)
+            previous_s1 = out['s1']
+            action = out['action_logits'].argmax(dim=1).item()
+
+            record['Frames_normalized_orig'].append(obs.copy())
+            record['ss'].append(out['s1'].numpy())
+            record['Q11s'].append(out['action_logits'].numpy()[0])
+            record['Q22s'].append(out['option_logits'].numpy()[0])
+            record['aas'].append([action])
+            record['oos'].append([out['option'].item()])
+            record['Vs'].append(out['value'].numpy()[0])
+            record['Vs2'].append(out['value2'].numpy()[0])
+            record['Vs_intrinsic'].append(out['value_intrinsic'].numpy()[0])
+            record['Vs_intrinsic2'].append(out['value_intrinsic2'].numpy()[0])
+
             if args.render and episode_idx % args.render_freq == 0:
                 render_frame = env.render(mode='rgb_array')
                 if render_frame is not None:
                     frames_render.append(render_frame)
-            
-            # Take step in environment
+
             obs, reward, done, info = env.step(action)
+            record['rewards'].append(reward)
             reward_sum += reward
-            rewards.append(reward)
             step_count += 1
-            
-            # Clear s_values after storing to prevent memory buildup
-            if hasattr(net, 's_values'):
-                net.s_values = []
-        
+
         print(f"[eval] Episode complete: {step_count} steps, reward = {reward_sum:.2f}")
-        
-        # Package episode data
-        episode_data = {
-            'Frames_normalized_orig': np.array(frames_normalized_orig),
-            'ss': np.array(ss),
-            'Q11s': np.array(Q11s),
-            'aas': np.array(aas),
-            'rewards': np.array(rewards),
-            'Vs': np.array(Vs),
-        }
-        if len(oos) > 0:
-            episode_data['oos'] = np.array(oos)
-        if len(Q22s) > 0:
-            episode_data['Q22s'] = np.array(Q22s)
-        if len(Vs2) > 0:
-            episode_data['Vs2'] = np.array(Vs2)
-        if len(Vs_intrinsic) > 0:
-            episode_data['Vs_intrinsic'] = np.array(Vs_intrinsic)
-        if len(Vs_intrinsic2) > 0:
-            episode_data['Vs_intrinsic2'] = np.array(Vs_intrinsic2)
-        if len(x_restoreds) > 0:
-            episode_data['x_restoreds'] = np.array(x_restoreds)
-        
+        episode_data = {key: np.array(values) for key, values in record.items()}
         if frames_render:
             episode_data['frames_render'] = frames_render
-            
         all_episodes_data.append(episode_data)
-    
+
     return all_episodes_data
 
 
 def save_eval_results(all_episodes_data, args):
-    """
-    Save evaluation results to disk in the format expected by drawing tools.
-    
-    For single episode: saves directly to output folder
-    For multiple episodes: creates subfolders
-    """
-    # Generate output directory
+    """Save one .npy per array. Several episodes go to episode_<i>/ subfolders."""
     if args.output_dir is None:
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H:%M:%S')
         model_name = os.path.basename(args.model_path).split('.')[0]
-        
         if args.on_cluster:
-            # On cluster: save to logs/experiment_name/Eval_.../
-            exp_name = getattr(args, 'experiment_name', 'eval')
-            args.output_dir = f"logs/{exp_name}/Eval_{timestamp}_{model_name}/"
+            args.output_dir = f"logs/{args.experiment_name}/Eval_{timestamp}_{model_name}/"
         else:
             args.output_dir = f"./Eval_{timestamp}_{model_name}/"
-    
     os.makedirs(args.output_dir, exist_ok=True)
     print(f"\n[eval] Saving results to: {args.output_dir}")
-    
+
+    model_prefix = os.path.basename(args.model_path).replace('.dat', '').replace('.pth', '')
     for episode_idx, episode_data in enumerate(all_episodes_data):
-        # For multiple episodes, create subfolders
         if len(all_episodes_data) > 1:
             episode_dir = os.path.join(args.output_dir, f"episode_{episode_idx}")
             os.makedirs(episode_dir, exist_ok=True)
         else:
             episode_dir = args.output_dir
-        
-        # Get model name for file prefixes (strip path and extension)
-        model_prefix = os.path.basename(args.model_path).replace('.dat', '').replace('.pth', '')
-        
-        # Save all arrays with the naming convention from old eval
+
         for key, data in episode_data.items():
             if key == 'frames_render':
-                # Save render frames as mp4 if available
                 try:
                     import imageio
                     render_path = os.path.join(episode_dir, f"{model_prefix}_render.mp4")
@@ -369,31 +191,19 @@ def save_eval_results(all_episodes_data, args):
                 except Exception as e:
                     print(f"[eval] Warning: Could not save render: {e}")
             else:
-                # Save numpy arrays
                 filepath = os.path.join(episode_dir, f"{model_prefix}_{key}.npy")
                 np.save(filepath, data)
                 print(f"[eval] Saved {key}: {filepath} (shape: {data.shape})")
-    
+
     print(f"\n[eval] All results saved to: {args.output_dir}")
     return args.output_dir
 
 
 def main():
     args = parse_args()
-    
-    # Load model and environment
     net, env = load_model_and_env(args)
-    
-    # Run evaluation
     all_episodes_data = run_evaluation(net, env, args)
-    
-    # Save results
-    output_dir = save_eval_results(all_episodes_data, args)
-    
-    # Print summary
-    print(f"\n[eval] Evaluation complete!")
-    print(f"[eval] Output directory: {output_dir}")
-    
+    save_eval_results(all_episodes_data, args)
     env.close()
 
 

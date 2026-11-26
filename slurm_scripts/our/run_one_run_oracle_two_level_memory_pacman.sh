@@ -20,4 +20,4 @@ conda activate pytorch_rl
 echo "ACTIVATED"
 
 param=$1
-python /s/ls4/users/aamore/rl_a3c_pytorch/src/main.py /s/ls4/users/aamore/rl_a3c_pytorch/configs/run_config_oracle_two_level_h4_h16_n4.ini ${param} | tee mytask_logs/mytask.log."$SLURM_JOBID"
+python /s/ls4/users/aamore/rl_a3c_pytorch/src/main.py /s/ls4/users/aamore/rl_a3c_pytorch/configs/run_config_oracle_two_level_memory_pacman.ini ${param} | tee mytask_logs/mytask.log."$SLURM_JOBID"

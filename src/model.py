@@ -1,1173 +1,200 @@
+"""
+The neural network of the agent.
+
+The agent has two levels. Both levels look at the same game screen.
+
+  Level 2 (the "manager") picks an OPTION every step: a number from 0 to num_options-1.
+  Level 1 (the "worker") picks the GAME ACTION every step, knowing the current option.
+
+Each level has four heads:
+  actor             - what to do (game action for level 1, option for level 2)
+  external critic   - how much game reward is expected
+  intrinsic critic  - how much oracle reward is expected
+  oracle            - a guess of how the level's features will change next
+
+Level 1 also has a MEMORY: besides the current features s1 it sees how s1 changed
+since the previous step (s1 - previous s1).
+
+Shapes (for one 80x80 frame):
+  s1      64 x 4 x 4   features of the screen
+  memory  64 x 4 x 4   s1 - previous s1
+  s2      32 x 4 x 4   level-2 features, computed from s1
+"""
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
 
 
-class RMSNorm(nn.Module):
-    """Root Mean Square Layer Normalization - kept for compatibility with EncoderRules234"""
-    def __init__(self, d, p=-1., eps=1e-8, bias=False):
-        super(RMSNorm, self).__init__()
-        self.eps = eps
-        self.d = d
-        self.p = p
-        self.bias = bias
-        self.scale = nn.Parameter(torch.ones(d))
-        if self.bias:
-            self.offset = nn.Parameter(torch.zeros(d))
+def init_conv(conv, use_fan_in_only):
+    """Uniform init scaled for ReLU. Biases start at zero."""
+    fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(conv.weight)
+    if use_fan_in_only:
+        fan = fan_in
+    else:
+        fan = (fan_in + fan_out) / 2
+    bound = math.sqrt(3.0) * nn.init.calculate_gain('relu') / math.sqrt(fan)
+    nn.init.uniform_(conv.weight, -bound, bound)
+    conv.bias.data.fill_(0)
 
-    def forward(self, x):
-        if self.p < 0. or self.p > 1.:
-            norm_x = x.norm(2, dim=-1, keepdim=True)
-            d_x = self.d
-        else:
-            partial_size = int(self.d * self.p)
-            partial_x, _ = torch.split(x, [partial_size, self.d - partial_size], dim=-1)
-            norm_x = partial_x.norm(2, dim=-1, keepdim=True)
-            d_x = partial_size
-        rms_x = norm_x * d_x ** (-1. / 2)
-        x_normed = x / (rms_x + self.eps)
-        if self.bias:
-            return self.scale * x_normed + self.offset
-        return self.scale * x_normed
+
+def init_linear(linear, scale):
+    """Gaussian init with std 1/sqrt(fan_in), then multiplied by `scale`. Biases start at zero."""
+    fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
+    nn.init.normal_(linear.weight, mean=0.0, std=1.0 / math.sqrt(fan_in))
+    linear.weight.data.mul_(scale)
+    linear.bias.data.fill_(0)
 
 
 class EncoderRules234(nn.Module):
-    """Encoder following Rules 2, 3, 4 - used by A3CRules2378"""
-    def __init__(self, num_inputs, latent_dim_conv=64, use_rmsnorm=False):
+    """Screen (1 x 80 x 80) -> s1 (64 x 4 x 4). Four conv-maxpool-relu layers."""
+
+    def __init__(self, num_inputs):
         super(EncoderRules234, self).__init__()
-        self.use_rmsnorm = use_rmsnorm
         self.conv1 = nn.Conv2d(num_inputs, 32, 5, stride=1, padding=2)
         self.conv2 = nn.Conv2d(32, 32, 5, stride=1, padding=1)
         self.conv3 = nn.Conv2d(32, 64, 4, stride=1, padding=1)
-        self.conv4 = nn.Conv2d(64, latent_dim_conv, 3, stride=1, padding=1)
-        self.rmsnorm = RMSNorm((1024))
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        convs = [self.conv1, self.conv2, self.conv3, self.conv4]
-        gain = nn.init.calculate_gain('relu')
-        for conv in convs:
-            if conv.bias is not None:
-                conv.bias.data.fill_(0)
-            fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(conv.weight)
-            if conv is self.conv1:
-                fan = fan_in
-            else:
-                fan = (fan_in + fan_out) / 2
-            if fan > 0:
-                std = gain / math.sqrt(fan)
-                bound = math.sqrt(3.0) * std
-                nn.init.uniform_(conv.weight, -bound, bound)
+        self.conv4 = nn.Conv2d(64, 64, 3, stride=1, padding=1)
+        init_conv(self.conv1, use_fan_in_only=True)
+        init_conv(self.conv2, use_fan_in_only=False)
+        init_conv(self.conv3, use_fan_in_only=False)
+        init_conv(self.conv4, use_fan_in_only=False)
 
     def forward(self, x):
-        # Rule 2: 3 conv-relu-maxpool layers
         x = F.relu(F.max_pool2d(self.conv1(x), 2, 2))
         x = F.relu(F.max_pool2d(self.conv2(x), 2, 2))
         x = F.relu(F.max_pool2d(self.conv3(x), 2, 2))
-        # Rule 3: conv4-relu-maxpool
         x = F.relu(F.max_pool2d(self.conv4(x), 2, 2))
-        # Rule 4: RMS-norm (optional) - controlled by use_rmsnorm flag
-        if self.use_rmsnorm:
-            x = x.view(x.size(0), -1)
-            x = self.rmsnorm(x)
-        return x, None, None, None
+        return x
 
-
-class A3CRules2378(nn.Module):
-    """
-    A3C model following Rules 2, 3, 7, 8 (no RMS normalization by default).
-    
-    Architecture pipeline (noRMS version):
-    1) 3 conv-relu-maxpool layers
-    2) conv4-relu-maxpool
-    3) relu-fc
-    4) linear value & actor heads
-    """
-    def __init__(self, num_inputs, action_space, args):
-        super(A3CRules2378, self).__init__()
-        self.hidden_size = args.hidden_size
-        self.monitor_s = getattr(args, 'monitor_s', False)
-        if self.monitor_s:
-            self.s_values = []
-        
-        use_rmsnorm = getattr(args, 'use_rmsnorm', False)
-        self.encoder = EncoderRules234(num_inputs, latent_dim_conv=64, use_rmsnorm=use_rmsnorm)
-
-        num_outputs = action_space.n
-        # Rule 7: relu-fc
-        self.fc = nn.Linear(1024, self.hidden_size)
-        # Rule 8: linear value&actor heads
-        self.critic_linear = nn.Linear(self.hidden_size, 1)
-        self.actor_linear = nn.Linear(self.hidden_size, num_outputs)
-
-        # Custom initialization for fc
-        fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(self.fc.weight)
-        fan = (fan_in + fan_out) / 2
-        gain = nn.init.calculate_gain("relu")
-        std = gain / math.sqrt(fan)
-        bound = math.sqrt(3.0) * std
-        with torch.no_grad():
-            self.fc.weight.uniform_(-bound, bound)
-        self.fc.bias.data.fill_(0)
-
-        # Heads initialization Rule 8: gaussian init with only fan_in
-        for linear in [self.critic_linear, self.actor_linear]:
-            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
-            std = 1.0 / math.sqrt(fan_in)
-            nn.init.normal_(linear.weight, mean=0.0, std=std)
-            linear.bias.data.fill_(0)
-
-        self.actor_linear.weight.data.mul_(0.01)
-        self.critic_linear.weight.data.mul_(1.0)
-
-        self.train()
-
-    def forward(self, inputs, hx, cx, mem=None):
-        x, _, _, _ = self.encoder(inputs)
-        s = x.view(x.size(0), -1)
-
-        if self.monitor_s:
-            self.s_values.append(s.detach().cpu())
-
-        hx = torch.Tensor([0])
-        cx = torch.Tensor([0])
-
-        # Rule 7: relu-fc
-        x = F.relu(self.fc(s))
-
-        # Rule 8: linear heads
-        return self.critic_linear(x), self.actor_linear(x), hx, cx, None, None
-
-
-class A3CRules2378_nofc(nn.Module):
-    """Same as A3CRules2378 but without fc after conv layers - heads connect directly to encoder output."""
-    def __init__(self, num_inputs, action_space, args):
-        super(A3CRules2378_nofc, self).__init__()
-        self.monitor_s = getattr(args, 'monitor_s', False)
-        if self.monitor_s:
-            self.s_values = []
-        
-        use_rmsnorm = getattr(args, 'use_rmsnorm', False)
-        self.encoder = EncoderRules234(num_inputs, latent_dim_conv=64, use_rmsnorm=use_rmsnorm)
-
-        num_outputs = action_space.n
-        # No fc layer - connect directly to heads from encoder output (1024)
-        # Rule 8: linear value&actor heads
-        self.critic_linear = nn.Linear(1024, 1)
-        self.actor_linear = nn.Linear(1024, num_outputs)
-
-        # Heads initialization Rule 8: gaussian init with only fan_in
-        for linear in [self.critic_linear, self.actor_linear]:
-            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
-            std = 1.0 / math.sqrt(fan_in)
-            nn.init.normal_(linear.weight, mean=0.0, std=std)
-            linear.bias.data.fill_(0)
-
-        self.actor_linear.weight.data.mul_(0.01)
-        self.critic_linear.weight.data.mul_(1.0)
-
-        self.train()
-
-    def forward(self, inputs, hx, cx, mem=None):
-        x, _, _, _ = self.encoder(inputs)
-
-        s = x.view(x.size(0), -1)
-
-        if self.monitor_s:
-            self.s_values.append(s.detach().cpu())
-
-        hx = torch.Tensor([0])
-        cx = torch.Tensor([0])
-
-        # No fc layer - directly to heads
-        # Rule 8: linear heads
-        return self.critic_linear(s), self.actor_linear(s), hx, cx, None, None
-
-    
 
 class EncoderRules234_2(nn.Module):
-    """Encoder following Rules 2, 3, 4 - used by A3CRules2378"""
+    """s1 (64 x 4 x 4) -> s2 (32 x 4 x 4). One conv-relu layer."""
+
     def __init__(self):
         super(EncoderRules234_2, self).__init__()
         self.conv1 = nn.Conv2d(64, 32, 3, stride=1, padding=1)
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        convs = [self.conv1]#, self.conv2, self.conv3, self.conv4]
-        gain = nn.init.calculate_gain('relu')
-        for conv in convs:
-            if conv.bias is not None:
-                conv.bias.data.fill_(0)
-            fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(conv.weight)
-            if conv is self.conv1:
-                fan = fan_in
-            else:
-                fan = (fan_in + fan_out) / 2
-            if fan > 0:
-                std = gain / math.sqrt(fan)
-                bound = math.sqrt(3.0) * std
-                nn.init.uniform_(conv.weight, -bound, bound)
+        init_conv(self.conv1, use_fan_in_only=True)
 
     def forward(self, x):
-        # s1 dim 1024 at input? non flat!!! 64*4*4
-        
-        x = F.relu(self.conv1(x))
-        return x, None, None, None
+        return F.relu(self.conv1(x))
 
-class EncoderRules234_2_mem(nn.Module):
-    """Encoder following Rules 2, 3, 4 - used by A3CRules2378 with more aggressive channel compression"""
-    def __init__(self):
-        super(EncoderRules234_2_mem, self).__init__()
-        # More aggressive channel compression: 128 -> 16 channels
-        self.conv1 = nn.Conv2d(64+64, 32+32, 3, stride=1, padding=1)
-        self.reset_parameters()
 
-    def reset_parameters(self):
-        convs = [self.conv1]
-        gain = nn.init.calculate_gain('relu')
-        for conv in convs:
-            if conv.bias is not None:
-                conv.bias.data.fill_(0)
-            fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(conv.weight)
-            if conv is self.conv1:
-                fan = fan_in
-            else:
-                fan = (fan_in + fan_out) / 2
-            if fan > 0:
-                std = gain / math.sqrt(fan)
-                bound = math.sqrt(3.0) * std
-                nn.init.uniform_(conv.weight, -bound, bound)
-
-    def forward(self, x):
-        # s1 dim 1024 at input? non flat!!! 64*4*4
-        
-        x = F.relu(self.conv1(x))
-
-        print(f"Final output shape: {x.shape}")
-        return x, None, None, None
-
-class Hierarchial(nn.Module):
-    def __init__(self, num_inputs, action_space, args):
-        super(Hierarchial, self).__init__()
-        self.hidden_size = args.hidden_size
-        self.monitor_s = getattr(args, 'monitor_s', False)
-        if self.monitor_s:
-            self.s_values = []
-        
-        num_outputs = action_space.n
-        
-        # Level 1 encoder (same as A3CRules2378)
-        use_rmsnorm = getattr(args, 'use_rmsnorm', False)
-        self.level1_encoder = EncoderRules234(num_inputs, latent_dim_conv=64, use_rmsnorm=use_rmsnorm)
-        
-        # Level 2 encoder (64*4*4 input)
-        self.level2_encoder = EncoderRules234_2()
-
-        # Level 2 heads (32*4*4 = 512 input)
-        self.critic_linear2 = nn.Linear(32*4*4, 1)
-        self.actor_linear2 = nn.Linear(32*4*4, 16)
-
-        # Level 1 heads (64*4*4 = 1024 input, concat with a2)
-        self.critic_linear = nn.Linear(64*4*4, 1)
-        self.actor_linear = nn.Linear(64*4*4 + 16, num_outputs)
-
-        # Initialize level 2 heads
-        for linear in [self.critic_linear2, self.actor_linear2]:
-            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
-            std = 1.0 / math.sqrt(fan_in)
-            nn.init.normal_(linear.weight, mean=0.0, std=std)
-            linear.bias.data.fill_(0)
-
-        # Initialize level 1 heads
-        for linear in [self.critic_linear, self.actor_linear]:
-            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
-            std = 1.0 / math.sqrt(fan_in)
-            nn.init.normal_(linear.weight, mean=0.0, std=std)
-            linear.bias.data.fill_(0)
-
-        self.actor_linear.weight.data.mul_(0.01)
-        self.critic_linear.weight.data.mul_(1.0)
-
-        self.train()
-
-    def forward(self, inputs, hx, cx, mem=None):
-        # Level 1 encoding
-        s, _, _, _ = self.level1_encoder(inputs)  # s: 64*4*4
-
-        if self.monitor_s:
-            self.s_values.append(s.detach().cpu())
-
-        hx = torch.Tensor([0])
-        cx = torch.Tensor([0])
-
-        # Level 2 processing
-        s2 = s #F.relu(s)
-        s2, _, _, _ = self.level2_encoder(s2)  # s2: 32*4*4
-        s2_flat = s2.view(s2.size(0), -1)
-        a2_logits = self.actor_linear2(s2_flat)
-        V2 = self.critic_linear2(s2_flat)
-
-        # Sample from a2 probabilities to get one-hot binary vector
-        a2_probs = F.softmax(a2_logits, dim=1)
-        a2_sample = a2_probs.multinomial(1)  # Sample
-        a2_onehot = torch.zeros_like(a2_probs)
-        a2_onehot.scatter_(1, a2_sample, 1.0)  # Create binary
-
-        # Level 1 processing
-        s_flat = s.view(s.size(0), -1)
-        s_flat = F.relu(s_flat)
-        actor_input = torch.cat([s_flat, a2_onehot], dim=1)
-        a1 = self.actor_linear(actor_input)
-        V1 = self.critic_linear(s_flat)
-
-        return V1, a1, hx, cx, None, None, V2, a2_logits
-
-
-class Hierarchial_memory(nn.Module):
-    def __init__(self, num_inputs, action_space, args):
-        super(Hierarchial_memory, self).__init__()
-        self.hidden_size = args.hidden_size
-        self.gamma1 = args.gamma
-        self.monitor_s = getattr(args, 'monitor_s', False)
-        if self.monitor_s:
-            self.s_values = []
-        
-        num_outputs = action_space.n
-        
-        # Level 1 encoder (same as A3CRules2378)
-        use_rmsnorm = getattr(args, 'use_rmsnorm', False)
-        self.level1_encoder = EncoderRules234(num_inputs, latent_dim_conv=64, use_rmsnorm=use_rmsnorm)
-        
-        # Level 2 encoder (64*4*4 input)
-        self.level2_encoder = EncoderRules234_2_mem()
-
-        # Level 2 heads (32*4*4 = 512 input)
-        self.critic_linear2 = nn.Linear((32+32)*4*4, 1)
-        self.actor_linear2 = nn.Linear((32+32)*4*4, 16)
-
-        # Level 1 heads (64*4*4 = 1024 input + 1024 memory)
-        self.critic_linear = nn.Linear(1024 + 1024, 1)
-        self.actor_linear = nn.Linear(64*4*4 + 16, num_outputs)
-
-        # Initialize level 2 heads
-        for linear in [self.critic_linear2, self.actor_linear2]:
-            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
-            std = 1.0 / math.sqrt(fan_in)
-            nn.init.normal_(linear.weight, mean=0.0, std=std)
-            linear.bias.data.fill_(0)
-
-        # Initialize level 1 heads
-        for linear in [self.critic_linear, self.actor_linear]:
-            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
-            std = 1.0 / math.sqrt(fan_in)
-            nn.init.normal_(linear.weight, mean=0.0, std=std)
-            linear.bias.data.fill_(0)
-
-        self.actor_linear.weight.data.mul_(0.01)
-        self.critic_linear.weight.data.mul_(1.0)
-
-        # Internal memory for running differences on features (level1 only)
-        self.running_mem = torch.zeros((1,64,4,4))
-        self.prev_x_conv = torch.zeros((1,64,4,4))
-
-        self.train()
-
-    def forward(self, inputs, hx, cx, mem=None):
-        # Level 1 encoding
-        s, _, _, _ = self.level1_encoder(inputs)  # s: 64*4*4
-
-        if self.monitor_s:
-            self.s_values.append(s.detach().cpu())
-
-        hx = torch.Tensor([0])
-        cx = torch.Tensor([0])
-
-        x_conv = s  # Keep as 4D tensor (64,4,4)
-
-        # Compute running mem (level1 only)
-        if self.running_mem is None:
-            self.running_mem = torch.zeros_like(x_conv)
-        if self.prev_x_conv is not None:
-            diff = (x_conv - self.prev_x_conv).detach()
-            self.running_mem = (diff + self.gamma1 * self.running_mem).detach()
-
-        self.prev_x_conv = x_conv.detach()
-
-        # Level 2
-        # Level 2 processing with memory
-        s2 = s#F.relu(s)
-        # Concat s2 with relu(running memory) along channel dimension
-        #F.relu(self.running_mem)
-        s2_input = torch.cat([s2, self.running_mem], dim=1) # 64 + 64 at input
-        s2, _, _, _ = self.level2_encoder(s2_input)  # s2: (32+32)*4*4 = 64*4*4
-        s2_flat = s2.view(s2.size(0), -1)
-        a2_logits = self.actor_linear2(s2_flat)
-        V2 = self.critic_linear2(s2_flat)
-
-        # Sample from a2 probabilities to get one-hot binary vector
-        a2_probs = F.softmax(a2_logits, dim=1)
-        a2_sample = a2_probs.multinomial(1)  # Sample
-        a2_onehot = torch.zeros_like(a2_probs)
-        a2_onehot.scatter_(1, a2_sample, 1.0)  # Create binary
-        
-
-        # Level 1 processing
-        # Flatten features for linear layers but keep memory as 4D
-        s_flat = x_conv.view(x_conv.size(0), -1)
-        critic_input = torch.cat([s_flat, self.running_mem.view(self.running_mem.size(0), -1)], dim=1)
-        V1 = self.critic_linear(critic_input)
-        actor_input = torch.cat([s_flat, a2_onehot], dim=1)
-        a1 = self.actor_linear(actor_input)
-
-        return V1, a1, hx, cx, None, None, V2, a2_logits
-
-
-class Hierarchial_memory_memrelu(nn.Module):
-    """
-    Same as Hierarchial_memory but makes copies of memory before passing to critic and 2nd level,
-    and passes these copies through ReLU activation.
-    """
-    def __init__(self, num_inputs, action_space, args):
-        super(Hierarchial_memory_memrelu, self).__init__()
-        self.hidden_size = args.hidden_size
-        self.gamma1 = args.gamma
-        self.monitor_s = getattr(args, 'monitor_s', False)
-        if self.monitor_s:
-            self.s_values = []
-        
-        num_outputs = action_space.n
-        
-        # Level 1 encoder (same as A3CRules2378)
-        use_rmsnorm = getattr(args, 'use_rmsnorm', False)
-        self.level1_encoder = EncoderRules234(num_inputs, latent_dim_conv=64, use_rmsnorm=use_rmsnorm)
-        
-        # Level 2 encoder (64*4*4 input)
-        self.level2_encoder = EncoderRules234_2_mem()
-
-        # Level 2 heads ((32+32)*4*4 = 512 input)
-        self.critic_linear2 = nn.Linear((32+32)*4*4, 1)
-        self.actor_linear2 = nn.Linear((32+32)*4*4, 16)
-
-        # Level 1 heads (64*4*4 = 1024 input + 1024 memory)
-        self.critic_linear = nn.Linear(1024 + 1024, 1)
-        self.actor_linear = nn.Linear(64*4*4 + 16, num_outputs)
-
-        # Initialize level 2 heads
-        for linear in [self.critic_linear2, self.actor_linear2]:
-            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
-            std = 1.0 / math.sqrt(fan_in)
-            nn.init.normal_(linear.weight, mean=0.0, std=std)
-            linear.bias.data.fill_(0)
-
-        # Initialize level 1 heads
-        for linear in [self.critic_linear, self.actor_linear]:
-            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
-            std = 1.0 / math.sqrt(fan_in)
-            nn.init.normal_(linear.weight, mean=0.0, std=std)
-            linear.bias.data.fill_(0)
-
-        self.actor_linear.weight.data.mul_(0.01)
-        self.critic_linear.weight.data.mul_(1.0)
-
-        # Internal memory for running differences on features (level1 only)
-        self.running_mem = torch.zeros((1,64,4,4))
-        self.prev_x_conv = torch.zeros((1,64,4,4))
-
-        self.train()
-
-    def forward(self, inputs, hx, cx, mem=None):
-        # Level 1 encoding
-        s, _, _, _ = self.level1_encoder(inputs)  # s: 64*4*4
-
-        if self.monitor_s:
-            self.s_values.append(s.detach().cpu())
-
-        hx = torch.Tensor([0])
-        cx = torch.Tensor([0])
-
-        x_conv = s  # Keep as 4D tensor (64,4,4)
-
-        # Compute running mem (level1 only)
-        if self.running_mem is None:
-            self.running_mem = torch.zeros_like(x_conv)
-        if self.prev_x_conv is not None:
-            diff = (x_conv - self.prev_x_conv).detach()
-            self.running_mem = (diff + self.gamma1 * self.running_mem).detach()
-
-        self.prev_x_conv = x_conv.detach()
-
-        # Create copies of memory and pass through ReLU
-        mem_for_level2 = F.relu(self.running_mem.clone())
-        mem_for_critic = F.relu(self.running_mem.clone())
-
-        # Level 2 processing with memory copy through ReLU
-        s2 = s
-        s2_input = torch.cat([s2, mem_for_level2], dim=1)  # 64 + 64 at input
-        s2, _, _, _ = self.level2_encoder(s2_input)  # s2: (32+32)*4*4 = 64*4*4
-        s2_flat = s2.view(s2.size(0), -1)
-        a2_logits = self.actor_linear2(s2_flat)
-        V2 = self.critic_linear2(s2_flat)
-
-        # Sample from a2 probabilities to get one-hot binary vector
-        a2_probs = F.softmax(a2_logits, dim=1)
-        a2_sample = a2_probs.multinomial(1)  # Sample
-        a2_onehot = torch.zeros_like(a2_probs)
-        a2_onehot.scatter_(1, a2_sample, 1.0)  # Create binary
-        
-        # Level 1 processing
-        # Flatten features for linear layers
-        s_flat = x_conv.view(x_conv.size(0), -1)
-        # Use memory copy through ReLU for critic
-        critic_input = torch.cat([s_flat, mem_for_critic.view(mem_for_critic.size(0), -1)], dim=1)
-        V1 = self.critic_linear(critic_input)
-        actor_input = torch.cat([s_flat, a2_onehot], dim=1)
-        a1 = self.actor_linear(actor_input)
-
-        return V1, a1, hx, cx, None, None, V2, a2_logits
-
-
-class DecoderRules234(nn.Module):
-    def __init__(self, num_inputs, use_rmsnorm=False, latent_dim=64):
-        super(DecoderRules234, self).__init__()
-        self.use_rmsnorm = use_rmsnorm
-        # Mirror of EncoderRules234 convolutions in reverse order.
-        self.deconv4 = nn.ConvTranspose2d(latent_dim, 64, 3, stride=1, padding=1)
-        self.deconv3 = nn.ConvTranspose2d(64, 32, 4, stride=1, padding=1)
-        self.deconv2 = nn.ConvTranspose2d(32, 32, 5, stride=1, padding=1)
-        self.deconv1 = nn.ConvTranspose2d(32, num_inputs, 5, stride=1, padding=2)
-
-    def forward(self, x):
-        if self.use_rmsnorm and x.dim() == 2:
-            spatial = int(math.sqrt(x.size(1) // 64))
-            x = x.view(x.size(0), 64, spatial, spatial)
-        # Undo max-pool stages with target spatial sizes for 80x80 inputs.
-        x = F.interpolate(x, size=(9, 9), mode="nearest")
-        x = F.relu(self.deconv4(x))
-        x = F.interpolate(x, size=(18, 18), mode="nearest")
-        x = F.relu(self.deconv3(x))
-        x = F.interpolate(x, size=(38, 38), mode="nearest")
-        x = F.relu(self.deconv2(x))
-        x = F.interpolate(x, size=(80, 80), mode="nearest")
-        x = self.deconv1(x)
-        return x
-
-
-class DecoderRules234FC(DecoderRules234):
-    """Decoder for FC features: hidden -> 1024 -> mirrored DecoderRules234 topology."""
-    def __init__(self, hidden_size, num_inputs):
-        super(DecoderRules234FC, self).__init__(num_inputs, use_rmsnorm=False)
-        self.fc = nn.Linear(hidden_size, 1024)
-
-    def forward(self, x):
-        x = self.fc(x)
-        x = x.view(x.size(0), 64, 4, 4)
-        return super(DecoderRules234FC, self).forward(x)
-
-
-class A3CRules2378Oracle(A3CRules2378):
-    """A3CRules2378Mem with decoder and addtional loss.
-
-    1. Делаем декодер и добавляем лосс как в oracle (без fc)
-    2. Восстанавлиаем из fc
-    3. Передаем выход декодера в критика
-
-    делаем сначала без памяти
-    батч сайз 32
-    4. Добавляем память
-
-    The decoder reconstructs the input from the encoder feature map or RMSNorm-flattened
-    representation, and the forward returns x_restored for the restoration loss in train.py.
-    """
-    def __init__(self, num_inputs, action_space, args):
-        super(A3CRules2378Oracle, self).__init__(num_inputs, action_space, args)
-        self.hidden_size = args.hidden_size
-        self.monitor_s = getattr(args, 'monitor_s', False)
-        if self.monitor_s:
-            self.s_values = []
-        
-        use_rmsnorm = getattr(args, 'use_rmsnorm', False)
-        self.encoder = EncoderRules234(num_inputs, latent_dim_conv=64, use_rmsnorm=use_rmsnorm)
-        self.decoder = DecoderRules234(num_inputs, use_rmsnorm=use_rmsnorm)
-
-        num_outputs = action_space.n
-        # Oracle path: actor/critic/decoder consume encoder features directly.
-        self.critic_linear = nn.Linear(1024, 1)
-        self.actor_linear = nn.Linear(1024, num_outputs)
-
-        # Heads initialization Rule 8: gaussian init with only fan_in
-        for linear in [self.critic_linear, self.actor_linear]:
-            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
-            std = 1.0 / math.sqrt(fan_in)
-            nn.init.normal_(linear.weight, mean=0.0, std=std)
-            linear.bias.data.fill_(0)
-
-        self.actor_linear.weight.data.mul_(0.01)
-        self.critic_linear.weight.data.mul_(1.0)
-
-        self.train()
-
-    def forward(self, inputs, hx, cx, mem=None):
-        x, _, _, _ = self.encoder(inputs)
-
-        s = x.view(x.size(0), -1)
-
-        if self.monitor_s:
-            self.s_values.append(s.detach().cpu())
-
-        x_restored = self.decoder(x)
-
-        hx = torch.Tensor([0])
-        cx = torch.Tensor([0])
-
-        return self.critic_linear(s), self.actor_linear(s), hx, cx, x_restored
-
-
-class A3CRules2378OracleFC(A3CRules2378Oracle):
-    """A3CRules2378Oracle variant that decodes from FC activations instead of encoder output."""
-    def __init__(self, num_inputs, action_space, args):
-        super(A3CRules2378OracleFC, self).__init__(num_inputs, action_space, args)
-        num_outputs = action_space.n
-        self.fc = nn.Linear(1024, self.hidden_size)
-        self.critic_linear = nn.Linear(self.hidden_size, 1)
-        self.actor_linear = nn.Linear(self.hidden_size, num_outputs)
-        self.decoder = DecoderRules234FC(self.hidden_size, num_inputs)
-
-        fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(self.fc.weight)
-        fan = (fan_in + fan_out) / 2
-        gain = nn.init.calculate_gain("relu")
-        std = gain / math.sqrt(fan)
-        bound = math.sqrt(3.0) * std
-        with torch.no_grad():
-            self.fc.weight.uniform_(-bound, bound)
-        self.fc.bias.data.fill_(0)
-
-        for linear in [self.critic_linear, self.actor_linear]:
-            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
-            std = 1.0 / math.sqrt(fan_in)
-            nn.init.normal_(linear.weight, mean=0.0, std=std)
-            linear.bias.data.fill_(0)
-
-        self.actor_linear.weight.data.mul_(0.01)
-        self.critic_linear.weight.data.mul_(1.0)
-
-    def forward(self, inputs, hx, cx, mem=None):
-        x, _, _, _ = self.encoder(inputs)
-        s = x.view(x.size(0), -1)
-
-        if self.monitor_s:
-            self.s_values.append(s.detach().cpu())
-
-        hx = torch.Tensor([0])
-        cx = torch.Tensor([0])
-
-        x = F.relu(self.fc(s))
-        x_restored = self.decoder(x)
-
-        return self.critic_linear(x), self.actor_linear(x), hx, cx, x_restored
-
-
-class A3CRules2378OracleIntrinsicCritic(A3CRules2378Oracle):
-    """A3CRules2378Oracle with an additional intrinsic critic head."""
-    def __init__(self, num_inputs, action_space, args):
-        super(A3CRules2378OracleIntrinsicCritic, self).__init__(num_inputs, action_space, args)
-        self.critic_linear_intrinsic = nn.Linear(1024, 1)
-        fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.critic_linear_intrinsic.weight)
-        std = 1.0 / math.sqrt(fan_in)
-        nn.init.normal_(self.critic_linear_intrinsic.weight, mean=0.0, std=std)
-        self.critic_linear_intrinsic.bias.data.fill_(0)
-        self.critic_linear_intrinsic.weight.data.mul_(1.0)
-
-    def forward(self, inputs, hx, cx, mem=None):
-        x, _, _, _ = self.encoder(inputs)
-        s = x.view(x.size(0), -1)
-
-        if self.monitor_s:
-            self.s_values.append(s.detach().cpu())
-
-        x_restored = self.decoder(x)
-        hx = torch.Tensor([0])
-        cx = torch.Tensor([0])
-        value_intrinsic = self.critic_linear_intrinsic(s)
-        return self.critic_linear(s), self.actor_linear(s), hx, cx, x_restored, value_intrinsic
-
-
-class A3CRules2378OracleFCIntrinsicCritic(A3CRules2378OracleFC):
-    """A3CRules2378OracleFC with an additional intrinsic critic head."""
-    def __init__(self, num_inputs, action_space, args):
-        super(A3CRules2378OracleFCIntrinsicCritic, self).__init__(num_inputs, action_space, args)
-        self.critic_linear_intrinsic = nn.Linear(self.hidden_size, 1)
-        fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.critic_linear_intrinsic.weight)
-        std = 1.0 / math.sqrt(fan_in)
-        nn.init.normal_(self.critic_linear_intrinsic.weight, mean=0.0, std=std)
-        self.critic_linear_intrinsic.bias.data.fill_(0)
-        self.critic_linear_intrinsic.weight.data.mul_(1.0)
-
-    def forward(self, inputs, hx, cx, mem=None):
-        x, _, _, _ = self.encoder(inputs)
-        s = x.view(x.size(0), -1)
-
-        if self.monitor_s:
-            self.s_values.append(s.detach().cpu())
-
-        hx = torch.Tensor([0])
-        cx = torch.Tensor([0])
-        x = F.relu(self.fc(s))
-        x_restored = self.decoder(x)
-        value_intrinsic = self.critic_linear_intrinsic(x)
-        return self.critic_linear(x), self.actor_linear(x), hx, cx, x_restored, value_intrinsic
-
-
-class A3CRules2378OracleNoSplitEncoders(nn.Module):
-    """Oracle topology WITHOUT per-branch encoders (public base, usable as a `model_type`).
-
-    Pipeline: shared encoder -> `_branch_inputs` routing -> actor/critic heads read the branch
-    features directly (no per-branch conv); the decoder reconstructs from the actor/oracle
-    branch features. Mix in:
-      * `_SplitEncodersMixin`     -> adds the per-branch conv encoders (the classic
-                                     `A3CRules2378OracleSplitEncoders` topology),
-      * `_SharedFeatureDiffMixin` -> diff/concat input routing via actor_input_mode/critic_input_mode,
-      * `_IntrinsicCriticMixin`   -> an extra intrinsic critic head.
-
-    Head/decoder widths follow each branch's input channels (`_*_branch_channels`): 'shared'/'diff'
-    -> 64 ch / 1024 flat, 'concat' -> 128 ch / 2048 flat. Used bare, both heads read the current
-    shared features (64 ch)."""
-    def __init__(self, num_inputs, action_space, args):
-        super().__init__()
-        self.monitor_s = getattr(args, 'monitor_s', False)
-        if self.monitor_s:
-            self.s_values = []
-
-        use_rmsnorm = getattr(args, 'use_rmsnorm', False)
-        self.shared_encoder = EncoderRules234(num_inputs, latent_dim_conv=64, use_rmsnorm=use_rmsnorm)
-
-        actor_ch = self._actor_branch_channels()
-        critic_ch = self._critic_branch_channels()
-
-        # Decoder restores from the actor/oracle branch features (actor_ch channels, 4x4).
-        self.decoder = DecoderRules234(num_inputs, use_rmsnorm=False, latent_dim=actor_ch)
-
-        num_outputs = action_space.n
-        self.actor_linear = nn.Linear(actor_ch * 16, num_outputs)
-        self.critic_linear = nn.Linear(critic_ch * 16, 1)
-        self._init_heads()
-        self.train()
-
-    # --- dim hooks: _SplitEncodersMixin overrides these to 64 (its conv output width) ---
-    def _actor_branch_channels(self):
-        return self._mode_channels(getattr(self, 'actor_input_mode', 'shared'))
-
-    def _critic_branch_channels(self):
-        return self._mode_channels(getattr(self, 'critic_input_mode', 'shared'))
-
-    @staticmethod
-    def _mode_channels(mode):
-        return 128 if mode in ('concat', 'concat_memdiff', 'concat_memdiff_raw') else 64
-
-    def _init_heads(self):
-        for linear in [self.critic_linear, self.actor_linear]:
-            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
-            std = 1.0 / math.sqrt(fan_in)
-            nn.init.normal_(linear.weight, mean=0.0, std=std)
-            linear.bias.data.fill_(0)
-        self.actor_linear.weight.data.mul_(0.01)
-        self.critic_linear.weight.data.mul_(1.0)
-
-    @staticmethod
-    def _init_branch_conv(conv):
-        if conv.bias is not None:
-            conv.bias.data.fill_(0)
-        gain = nn.init.calculate_gain('relu')
-        fan_in, fan_out = nn.init._calculate_fan_in_and_fan_out(conv.weight)
-        fan = (fan_in + fan_out) / 2
-        std = gain / math.sqrt(fan)
-        bound = math.sqrt(3.0) * std
-        nn.init.uniform_(conv.weight, -bound, bound)
-
-    # --- routing / encoding hooks (overridable by mixins) ---
-    def _branch_inputs(self, shared):
-        """Inputs for the (actor/oracle, critic) branches. Base feeds current shared to both;
-        _SharedFeatureDiffMixin overrides with diff/concat routing."""
-        return shared, shared
-
-    def _encode_actor(self, x):
-        """Base (no split): identity. _SplitEncodersMixin overrides with relu(conv)."""
-        return x
-
-    def _encode_critic(self, x):
-        return x
-
-    def _extra_outputs(self, actor_flat, shared):
-        """Base: no extra head. _IntrinsicCriticMixin overrides to append value_intrinsic."""
-        return ()
-
-    def _oracle_output(self, actor_feat):
-        return self.decoder(actor_feat)
-
-    def _forward_core(self, inputs):
-        shared, _, _, _ = self.shared_encoder(inputs)
-        shared = shared.view(shared.size(0), 64, 4, 4)
-
-        actor_in, critic_in = self._branch_inputs(shared)
-
-        actor_feat = self._encode_actor(actor_in)
-        critic_feat = self._encode_critic(critic_in)
-
-        actor_flat = actor_feat.reshape(actor_feat.size(0), -1)
-        critic_flat = critic_feat.reshape(critic_feat.size(0), -1)
-
-        if self.monitor_s:
-            self.s_values.append(shared.detach().cpu())
-
-        x_restored = self._oracle_output(shared)
-        return actor_flat, critic_flat, x_restored, shared
-
-    def forward(self, inputs, hx, cx, mem=None):
-        actor_flat, critic_flat, x_restored, shared = self._forward_core(inputs)
-        hx = torch.Tensor([0])
-        cx = torch.Tensor([0])
-        return (
-            self.critic_linear(critic_flat),
-            self.actor_linear(actor_flat),
-            hx,
-            cx,
-            x_restored,
-            *self._extra_outputs(actor_flat, shared),
-        )
-
-
-class _SplitEncodersMixin:
-    """Mixin: adds the per-branch conv encoders (actor/oracle + critic), the classic
-    "split encoders" topology. Each is a Conv2d(branch_in -> 64), so the heads and decoder
-    always see 64 ch / 1024 flat regardless of the input mode. Mix in to the LEFT of the
-    NoSplit base (and to the RIGHT of _SharedFeatureDiffMixin, so the modes are set first)."""
-    def __init__(self, num_inputs, action_space, args):
-        super().__init__(num_inputs, action_space, args)
-        actor_in = self._mode_channels(getattr(self, 'actor_input_mode', 'shared'))
-        critic_in = self._mode_channels(getattr(self, 'critic_input_mode', 'shared'))
-        self.actor_oracle_encoder = nn.Conv2d(actor_in, 64, kernel_size=3, stride=1, padding=1)
-        self.critic_encoder = nn.Conv2d(critic_in, 64, kernel_size=3, stride=1, padding=1)
-        self._init_branch_conv(self.actor_oracle_encoder)
-        self._init_branch_conv(self.critic_encoder)
-
-    # branch convs output 64 ch -> heads/decoder are sized at 64 regardless of input mode
-    def _actor_branch_channels(self):
-        return 64
-
-    def _critic_branch_channels(self):
-        return 64
-
-    def _encode_actor(self, x):
-        return F.relu(self.actor_oracle_encoder(x))
-
-    def _encode_critic(self, x):
-        return F.relu(self.critic_encoder(x))
-
-
-class _IntrinsicCriticMixin:
-    """Mixin: adds an intrinsic critic head (read from the actor/oracle branch) via a 6th
-    forward output. `isinstance(model, _IntrinsicCriticMixin)` is the canonical "has an
-    intrinsic critic" test (used in train.py / player_util.py). The head is sized to the actor
-    branch flat width, so it works for both split (1024) and no-split concat (2048)."""
-    def __init__(self, num_inputs, action_space, args):
-        super().__init__(num_inputs, action_space, args)
-        self.critic_linear_intrinsic = nn.Linear(self._actor_branch_channels() * 16, 1)
-        fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.critic_linear_intrinsic.weight)
-        std = 1.0 / math.sqrt(fan_in)
-        nn.init.normal_(self.critic_linear_intrinsic.weight, mean=0.0, std=std)
-        self.critic_linear_intrinsic.bias.data.fill_(0)
-        self.critic_linear_intrinsic.weight.data.mul_(1.0)
-
-    def _extra_outputs(self, actor_flat, shared):
-        return (self.critic_linear_intrinsic(actor_flat),)
-
-
-class _SharedFeatureDiffMixin:
-    """Mixin: routes per-branch inputs via the temporal difference of shared-encoder features.
-    Config-driven by `actor_input_mode` / `critic_input_mode` (from args), each one of:
-        'shared' -> current shared features          (64 ch)
-        'diff'   -> shared_cur - prev_shared         (64 ch)
-        'concat' -> concat([shared, diff])           (128 ch, appearance + motion)
-        'concat_memdiff' -> concat([shared, shared - normalized memory]) (128 ch)
-        'concat_memdiff_raw' -> concat([shared, shared - (1-gamma)*memory]) (128 ch)
-    Defaults: actor 'concat', critic 'shared'. Mix in to the LEFT of the base.
-
-    Modes are set BEFORE super().__init__() so the base/split can size heads, decoder, and
-    branch convs by mode. `prev_shared` is per-worker model state (each train worker holds a
-    local model copy), reset to None at episode boundaries (see player_util) so the first frame
-    of an episode yields a zero diff. It keeps the graph (no per-step detach), so the diff also
-    backprops through the previous step (within-rollout BPTT); train.py detaches it at the batch
-    boundary so the next batch's first diff doesn't backprop into the freed graph. Declared as a
-    class attribute so hasattr(model, 'prev_shared') is True for the reset."""
-    prev_shared = None
-    memdiff_sum = None
-    memdiff_count = 0
-    _VALID_MODES = ('shared', 'diff', 'concat', 'concat_memdiff', 'concat_memdiff_raw')
-
-    def __init__(self, num_inputs, action_space, args):
-        self.actor_input_mode = getattr(args, 'actor_input_mode', 'concat')
-        self.critic_input_mode = getattr(args, 'critic_input_mode', 'shared')
-        self.gamma_memory = getattr(args, 'gamma_memory', 0.99)
-        assert self.actor_input_mode in self._VALID_MODES, f"bad actor_input_mode: {self.actor_input_mode}"
-        assert self.critic_input_mode in self._VALID_MODES, f"bad critic_input_mode: {self.critic_input_mode}"
-        super().__init__(num_inputs, action_space, args)
-
-    def _memory_diffs(self, shared):
-        if self.memdiff_sum is None or self.memdiff_count == 0:
-            normalized = raw = torch.zeros_like(shared)
-        else:
-            raw = shared - self.memdiff_sum * (1.0 - self.gamma_memory)
-            if self.gamma_memory == 1.0:
-                normalized = shared - (self.memdiff_sum / self.memdiff_count)
-            else:
-                weight = (1.0 - self.gamma_memory) / (1.0 - self.gamma_memory ** self.memdiff_count)
-                normalized = shared - self.memdiff_sum * weight
-
-        self.memdiff_sum = shared if self.memdiff_sum is None else shared + self.gamma_memory * self.memdiff_sum
-        self.memdiff_count += 1
-        return normalized, raw
-
-    def _branch_inputs(self, shared):
-        prev = self.prev_shared
-        diff = torch.zeros_like(shared) if prev is None else shared - prev
-        self.prev_shared = shared
-        memory_modes = (self.actor_input_mode, self.critic_input_mode)
-        normalized_memdiff = raw_memdiff = None
-        if 'concat_memdiff' in memory_modes or 'concat_memdiff_raw' in memory_modes:
-            normalized_memdiff, raw_memdiff = self._memory_diffs(shared)
-        pick = {
-            'shared': shared,
-            'diff': diff,
-            'concat': torch.cat([shared, diff], dim=1),
-            'concat_memdiff': (
-                torch.cat([shared, normalized_memdiff], dim=1)
-                if normalized_memdiff is not None else None
-            ),
-            'concat_memdiff_raw': (
-                torch.cat([shared, raw_memdiff], dim=1)
-                if raw_memdiff is not None else None
-            ),
-        }
-        return pick[self.actor_input_mode], pick[self.critic_input_mode]
-
-
-# --- Split-encoder variants (classic topology: per-branch conv encoders). Names/configs unchanged. ---
-class _FutureSharedDiffTargetMixin:
-    predicts_shared_diff = True
-
-    def __init__(self, num_inputs, action_space, args):
-        super().__init__(num_inputs, action_space, args)
-        self.shared_future_delta_head = nn.Conv2d(
-            self._actor_branch_channels(), 64, kernel_size=1
-        )
-        self._init_branch_conv(self.shared_future_delta_head)
-    def _oracle_output(self, actor_feat):
-        return self.shared_future_delta_head(actor_feat)
-
-    def _extra_outputs(self, actor_flat, shared):
-        return (*super()._extra_outputs(actor_flat, shared), shared.detach())
-
-    def terminal_next_shared(self, next_batched_input):
-        with torch.no_grad():
-            next_shared, _, _, _ = self.shared_encoder(next_batched_input)
-        return next_shared.view(next_shared.size(0), 64, 4, 4).detach()
-
-
-class A3CRules2378OracleSplitEncoders(_SplitEncodersMixin, A3CRules2378OracleNoSplitEncoders):
-    """Oracle split topology: NoSplit base + per-branch conv encoders (actor/oracle, critic)."""
-    pass
-
-
-class A3CRules2378OracleSplitEncodersIntrinsicCritic(_IntrinsicCriticMixin, A3CRules2378OracleSplitEncoders):
-    """Split-encoder oracle model with an additional intrinsic critic head."""
-    pass
-
-
-class A3CRules2378OracleSplitEncodersSharedDiff(_SharedFeatureDiffMixin, A3CRules2378OracleSplitEncoders):
-    """Split-encoder oracle model with diff/concat input routing (actor_input_mode /
-    critic_input_mode); branch convs reduce each input back to 64 ch."""
-    pass
-
-
-class A3CRules2378OracleSplitEncodersSharedDiffIntrinsicCritic(_SharedFeatureDiffMixin, _IntrinsicCriticMixin, A3CRules2378OracleSplitEncoders):
-    """SharedDiff split-encoder variant with an additional intrinsic critic head."""
-    pass
-
-
-# --- No-split variants (heads read shared/diff/concat directly; no per-branch conv). ---
-class A3CRules2378OracleNoSplitSharedDiff(_SharedFeatureDiffMixin, A3CRules2378OracleNoSplitEncoders):
-    """No-split oracle model with diff/concat input routing. With actor_input_mode=concat /
-    critic_input_mode=concat this is the no-split + concat topology (heads read the 128-ch
-    shared+diff concat directly, 2048 flat; decoder restores from the 128-ch concat)."""
-    pass
-
-
-class A3CRules2378OracleNoSplitSharedDiffIntrinsicCritic(_SharedFeatureDiffMixin, _IntrinsicCriticMixin, A3CRules2378OracleNoSplitEncoders):
-    """No-split SharedDiff variant with an additional intrinsic critic head."""
-    pass
-
-
-class A3CRules2378OracleNoSplitSharedFutureDiff(
-        _FutureSharedDiffTargetMixin, _SharedFeatureDiffMixin,
-        A3CRules2378OracleNoSplitEncoders):
-    pass
-
-
-class A3CRules2378OracleNoSplitSharedFutureDiffIntrinsicCritic(
-        _FutureSharedDiffTargetMixin, _SharedFeatureDiffMixin, _IntrinsicCriticMixin,
-        A3CRules2378OracleNoSplitEncoders):
-    pass
-
-
-def _init_level_linear(linear, weight_scale):
-    fan_in, _ = nn.init._calculate_fan_in_and_fan_out(linear.weight)
-    std = 1.0 / math.sqrt(fan_in)
-    nn.init.normal_(linear.weight, mean=0.0, std=std)
-    linear.bias.data.fill_(0)
-    linear.weight.data.mul_(weight_scale)
-
-
-class A3CRules2378OracleTwoLevel(A3CRules2378OracleNoSplitSharedDiffIntrinsicCritic):
-    """Two-level oracle conditioned on an option one-hot.
+class A3CRules2378OracleTwoLevelMemory(nn.Module):
+    """Two-level oracle agent with a one-step memory on level 1.
 
     Args:
-        num_inputs: Number of observation channels.
-        action_space: Environment action space. Uses ``action_space.n``.
+        num_inputs: Number of screen channels (1).
+        action_space: Game action space. Uses ``action_space.n``.
         args: Run config. Reads ``num_options``.
     """
 
-    predicts_shared_diff = True
-
     def __init__(self, num_inputs, action_space, args):
-        super(A3CRules2378OracleTwoLevel, self).__init__(
-            num_inputs, action_space, args
-        )
-        del self.decoder
-        self.num_options = getattr(args, 'num_options', 8)
-        actor_channels = self._actor_branch_channels()
-        critic_channels = self._critic_branch_channels()
-        actor_dim = actor_channels * 16
-        critic_dim = critic_channels * 16
+        super(A3CRules2378OracleTwoLevelMemory, self).__init__()
+        self.num_options = args.num_options
+        num_actions = action_space.n
+
+        s1_channels = 64
+        level1_channels = s1_channels * 2          # s1 and memory side by side
+        level1_size = level1_channels * 4 * 4      # 2048 numbers
         s2_channels = 32
-        s2_dim = s2_channels * 4 * 4
+        s2_size = s2_channels * 4 * 4              # 512 numbers
+
+        # Encoders
+        self.shared_encoder = EncoderRules234(num_inputs)
         self.level2_encoder = EncoderRules234_2()
-        self.oracle1_head = nn.Conv2d(
-            actor_channels + self.num_options, 64, kernel_size=1,
-        )
+
+        # Level 1 heads. Each one also reads the option as a one-hot vector.
+        self.actor_linear = nn.Linear(level1_size + self.num_options, num_actions)
+        self.critic_linear = nn.Linear(level1_size + self.num_options, 1)
+        self.critic_linear_intrinsic = nn.Linear(level1_size + self.num_options, 1)
+        self.oracle1_head = nn.Conv2d(level1_channels + self.num_options, s1_channels, kernel_size=1)
+
+        # Level 2 heads. They do not see the option: they choose it.
+        self.actor_linear2 = nn.Linear(s2_size, self.num_options)
+        self.critic_linear2 = nn.Linear(s2_size, 1)
+        self.critic_linear_intrinsic2 = nn.Linear(s2_size, 1)
         self.oracle2_head = nn.Conv2d(s2_channels, s2_channels, kernel_size=1)
-        self._init_branch_conv(self.oracle1_head)
-        self._init_branch_conv(self.oracle2_head)
-        self.actor_linear = nn.Linear(actor_dim + self.num_options, action_space.n)
-        self.critic_linear = nn.Linear(critic_dim + self.num_options, 1)
-        self.critic_linear_intrinsic = nn.Linear(actor_dim + self.num_options, 1)
-        self.actor_linear2 = nn.Linear(s2_dim, self.num_options)
-        self.critic_linear2 = nn.Linear(s2_dim, 1)
-        self.critic_linear_intrinsic2 = nn.Linear(s2_dim, 1)
-        _init_level_linear(self.actor_linear, 0.01)
-        _init_level_linear(self.critic_linear, 1.0)
-        _init_level_linear(self.critic_linear_intrinsic, 1.0)
-        _init_level_linear(self.actor_linear2, 0.01)
-        _init_level_linear(self.critic_linear2, 1.0)
-        _init_level_linear(self.critic_linear_intrinsic2, 1.0)
 
-    def _option_onehot(self, logits2, option_index=None):
-        """Build the option one-hot.
+        init_linear(self.actor_linear, 0.01)
+        init_linear(self.critic_linear, 1.0)
+        init_linear(self.critic_linear_intrinsic, 1.0)
+        init_conv(self.oracle1_head, use_fan_in_only=False)
+        init_linear(self.actor_linear2, 0.01)
+        init_linear(self.critic_linear2, 1.0)
+        init_linear(self.critic_linear_intrinsic2, 1.0)
+        init_conv(self.oracle2_head, use_fan_in_only=False)
+
+        self.train()
+
+    def forward(self, state, previous_s1, option=None):
+        """Run both levels on one screen.
 
         Args:
-            logits2: Option-policy logits.
-            option_index: Fixed option index. Sampled from ``logits2`` when omitted.
+            state: Screen, shape ``[1, 1, 80, 80]``.
+            previous_s1: ``s1`` of the previous step, or None at the start of an episode.
+            option: Option to use. When None the model chooses it: sampled while
+                training, the most likely one in ``eval()`` mode.
 
         Returns:
-            Detached one-hot and the option index.
+            Dict with every output, see the end of this function.
         """
-        probs2 = F.softmax(logits2, dim=1)
-        if option_index is None:
-            if self.training:
-                option_index = probs2.multinomial(1)
-            else:
-                option_index = probs2.argmax(dim=1, keepdim=True)
+        s1 = self.shared_encoder(state)
+
+        # Memory: how s1 changed since the previous step. Zero on the first step.
+        # previous_s1 is not detached, so gradients also flow into the previous step.
+        if previous_s1 is None:
+            s1_change = torch.zeros_like(s1)
         else:
-            if not torch.is_tensor(option_index):
-                option_index = torch.tensor(option_index, device=probs2.device)
-            option_index = option_index.to(device=probs2.device, dtype=torch.long)
-            option_index = option_index.reshape(probs2.size(0), 1)
-        onehot = torch.zeros_like(probs2)
-        onehot.scatter_(1, option_index, 1.0)
-        return onehot.detach(), option_index
+            s1_change = s1 - previous_s1
+        level1_input = torch.cat([s1, s1_change], dim=1)
+        level1_flat = level1_input.reshape(1, -1)
 
-    def _expected_external_value(self, critic_flat, logits2):
-        """External value averaged over the option distribution.
-
-        Args:
-            critic_flat: Critic features, shape ``[B, C]``.
-            logits2: Option-policy logits, shape ``[B, num_options]``.
-
-        Returns:
-            Expected external value, shape ``[B, 1]``.
-        """
-        probs = F.softmax(logits2, dim=1)
-        return self.critic_linear(torch.cat([critic_flat, probs], dim=1))
-
-    def _oracle_output(self, actor_feat):
-        """Skip the option-conditioned oracle until the one-hot exists.
-
-        Args:
-            actor_feat: Shared encoder map.
-
-        Returns:
-            The same map. ``forward`` replaces it with the oracle prediction.
-        """
-        return actor_feat
-
-    def _oracle1_with_option(self, shared, option_onehot):
-        """Predict the s1 change from the shared map and the option.
-
-        Args:
-            shared: Shared encoder map, shape ``[B, 64, H, W]``.
-            option_onehot: Detached option one-hot, shape ``[B, num_options]``. 0,1,0,0,0,0,0,0
-
-        Returns:
-            Predicted s1 change, shape ``[B, 64, H, W]``.
-        """
-        option_map = option_onehot[:, :, None, None].expand(
-            -1, -1, shared.size(2), shared.size(3),
-        )
-        return self.oracle1_head(torch.cat([shared, option_map], dim=1))
-
-    def forward(self, inputs, hx, cx, mem=None, option_index=None, marginal_external=False):
-        actor_flat, critic_flat, _, shared = self._forward_core(inputs)
-        s2, _, _, _ = self.level2_encoder(shared)
-        s2_flat = s2.reshape(s2.size(0), -1)
-        pred_s2 = self.oracle2_head(s2)
-        logits2 = self.actor_linear2(s2_flat)
+        # Level 2: features, heads, and oracle 2
+        s2 = self.level2_encoder(s1)
+        s2_flat = s2.reshape(1, -1)
+        option_logits = self.actor_linear2(s2_flat)
         value2 = self.critic_linear2(s2_flat)
         value_intrinsic2 = self.critic_linear_intrinsic2(s2_flat)
-        if marginal_external:
-            self.marginal_external_value = self._expected_external_value(
-                critic_flat, logits2,
-            ).detach()
-        # Level-1 heads and oracle 1 see the option. Oracle 2 already ran without it.
-        option_onehot, option_index = self._option_onehot(logits2, option_index)
-        pred_s1 = self._oracle1_with_option(shared, option_onehot)
-        actor_in = torch.cat([actor_flat, option_onehot], dim=1)
-        critic_in = torch.cat([critic_flat, option_onehot], dim=1)
-        hx = torch.Tensor([0])
-        cx = torch.Tensor([0])
-        return (
-            self.critic_linear(critic_in),
-            self.actor_linear(actor_in),
-            hx,
-            cx,
-            pred_s1,
-            self.critic_linear_intrinsic(actor_in),
-            value2,
-            logits2,
-            option_index,
-            value_intrinsic2,
-            shared.detach(),
-            s2.detach(),
-            pred_s2,
-        )
+        oracle2_prediction = self.oracle2_head(s2)
+
+        # Choose the option, then write it as a one-hot vector: [0, 1, 0, 0, ...]
+        if option is None:
+            option_probs = F.softmax(option_logits, dim=1)
+            if self.training:
+                option = option_probs.multinomial(1)
+            else:
+                option = option_probs.argmax(dim=1, keepdim=True)
+        option = torch.as_tensor(option).long().reshape(1, 1)
+        option_onehot = torch.zeros(1, self.num_options)
+        option_onehot[0, option.item()] = 1.0
+
+        # Level 1: heads see the features, the memory, and the option
+        level1_with_option = torch.cat([level1_flat, option_onehot], dim=1)
+        action_logits = self.actor_linear(level1_with_option)
+        value = self.critic_linear(level1_with_option)
+        value_intrinsic = self.critic_linear_intrinsic(level1_with_option)
+
+        # Oracle 1 gets the option as extra constant channels on the 4x4 map
+        option_map = option_onehot[:, :, None, None].expand(-1, -1, 4, 4)
+        oracle1_prediction = self.oracle1_head(torch.cat([level1_input, option_map], dim=1))
+
+        return {
+            # level 1
+            'action_logits': action_logits,
+            'value': value,
+            'value_intrinsic': value_intrinsic,
+            'oracle1_prediction': oracle1_prediction,   # guess of the change of s1
+            # level 2
+            'option_logits': option_logits,
+            'option': option,
+            'value2': value2,
+            'value_intrinsic2': value_intrinsic2,
+            'oracle2_prediction': oracle2_prediction,   # guess of the change of s2
+            # features
+            's1': s1,             # not detached: the next step's memory uses it
+            's2': s2.detach(),
+        }

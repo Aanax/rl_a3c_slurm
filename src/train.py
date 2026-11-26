@@ -1,499 +1,299 @@
+"""
+One training worker. Many of these run in parallel (A3C) and share one model.
+
+Each worker repeats:
+  1. copy the shared model
+  2. play num_steps steps (a batch), or fewer if a life is lost
+  3. walk the batch backwards in time and compute the losses
+  4. send the gradients to the shared model and make one optimizer step
+
+What each part of the model learns from:
+  Level 1 external critic   game rewards, per option (see update_option_returns)
+  Level 2 external critic   level-1 returns, scaled by (1 - gamma)
+  Oracle 1                  the change of s1, inside the current option
+  Oracle 2                  the change of s2
+  Level 1 intrinsic critic  oracle-1 reward = (1 - gamma) * cosine(oracle 1 guess, its target)
+  Level 2 intrinsic critic  oracle-2 reward = (1 - gamma2) * cosine(oracle 2 guess, its target)
+  Level 1 actor             level-1 intrinsic advantage
+  Level 2 actor             level-2 intrinsic advantage
+  Oracle losses are weighted by the external advantages.
+"""
 from __future__ import division
 import os
 os.environ["OMP_NUM_THREADS"] = "1"
 from setproctitle import setproctitle as ptitle
 import torch
-import torch.optim as optim
 import torch.nn.functional as F
 
 from environment import atari_env
 from utils import ensure_shared_grads
 import model
 from player_util import Agent
-from torch.autograd import Variable
 import time
 import pickle
 import csv
-import os
 
 
+def update_option_returns(returns, playing_option, reward, gamma, start_value):
+    """One step backwards in time for the returns of every option.
 
-def _option_index(option_id):
-    if torch.is_tensor(option_id):
-        return int(option_id.item())
-    return int(option_id)
-
-
-def activation_bootstrap(index, n_steps, batch_tail, plugs):
-    """Value after the last execution of an option in the batch.
+    Each option keeps its own return. Going backwards through the batch:
+      - the option that played at this step gets   R = gamma * R + reward
+      - every other option already met gets         R = gamma * R
+      - an option met for the first time starts from `start_value`
+        (its value at the state where it stopped playing)
 
     Args:
-        index: Step where the option executes.
-        n_steps: Number of steps in the batch.
-        batch_tail: Value at the state after the batch.
-        plugs: Value of this option at the next state, one entry per step.
-
-    Returns:
-        Detached bootstrap.
-    """
-    if index + 1 >= n_steps:
-        return batch_tail.detach()
-    plug = plugs[index]
-    if plug is None:
-        raise ValueError(
-            'missing bootstrap for an option that ends before the batch tail'
-        )
-    return plug.detach()
-
-
-def option_activation_returns(active, returns, option_id, reward, gamma, bootstrap):
-    """Update one backward step of every option seen so far.
-
-    Args:
-        active: Mutable flags, one per option.
-        returns: Mutable targets, one per option.
-        option_id: Option executing at this step.
-        reward: Reward added to the executing option.
+        returns: List with one return per option. None = not met yet. Changed in place.
+        playing_option: Option that played at this step.
+        reward: Reward of this step.
         gamma: Discount.
-        bootstrap: Tail used the first time ``option_id`` is seen.
+        start_value: Starting return of `playing_option` if it is met for the first time.
 
     Returns:
-        Target of the executing option.
+        The return of the playing option.
     """
-    for option_k, is_active in enumerate(active):
-        if option_k == option_id:
-            if not is_active:
-                if bootstrap is None:
-                    raise ValueError('activation bootstrap is missing')
-                returns[option_k] = bootstrap.detach()
-                active[option_k] = True
-            returns[option_k] = gamma * returns[option_k] + reward
-        elif is_active:
-            returns[option_k] = gamma * returns[option_k]
-    return returns[option_id]
-
-
-def level2_batch_return_step(running_return, reward, gamma):
-    """One backward step of the level-2 return across the batch.
-
-    Args:
-        running_return: Return accumulated from later steps.
-        reward: Level-2 reward at this step.
-        gamma: Level-2 discount.
-
-    Returns:
-        Discounted return at this step.
-    """
-    return gamma * running_return + reward
-
-
-def oracle_option_target(
-    future_target, delta, gamma, option_ended, bootstrap=None,
-):
-    """Discounted state-change target inside one option.
-
-    Args:
-        future_target: Target accumulated after this step.
-        delta: State change at this step.
-        gamma: Discount of this oracle target.
-        option_ended: True when this step ends the option.
-        bootstrap: Oracle prediction for the option that just ended.
-            Zero target when omitted.
-
-    Returns:
-        Gamma times the future target plus delta. A finished option uses
-        ``bootstrap`` as that future target.
-    """
-    if option_ended:
-        if bootstrap is None:
-            return torch.zeros_like(delta)
-        future_target = bootstrap
-    return gamma * future_target.detach() + delta
-
-
-def oracle_two_level_actor_loss(
-    log_prob1, advantage_int, entropy1,
-    log_prob2, advantage2, entropy2, entropy_coef,
-):
-    """Actor losses for the oracle two-level model.
-
-    Args:
-        log_prob1: Log-probability of the environment action.
-        advantage_int: Detached internal-critic advantage.
-        entropy1: Entropy of the level-1 policy.
-        log_prob2: Log-probability of the sampled option.
-        advantage2: Detached advantage of the level-2 policy.
-        entropy2: Entropy of the option policy.
-        entropy_coef: Coefficient of the entropy bonus.
-
-    Returns:
-        Tuple of level-1 and level-2 actor loss terms for one step.
-    """
-    policy1 = -(log_prob1 * advantage_int) - entropy_coef * entropy1
-    policy2 = -(log_prob2 * advantage2) - entropy_coef * entropy2
-    return policy1, policy2
-
-
-def external_advantage_restoration(cosine_loss, advantage_ext, weight):
-    """Scale the oracle cosine loss by the external advantage.
-
-    Args:
-        cosine_loss: Negative cosine between the decoder output and the target.
-        advantage_ext: Detached external-critic advantage.
-        weight: Restoration loss weight.
-
-    Returns:
-        Weighted restoration term for one step.
-    """
-    return weight * cosine_loss * advantage_ext
+    if returns[playing_option] is None:
+        returns[playing_option] = start_value.detach()
+    for option in range(len(returns)):
+        if returns[option] is None:
+            continue
+        if option == playing_option:
+            returns[option] = gamma * returns[option] + reward
+        else:
+            returns[option] = gamma * returns[option]
+    return returns[playing_option]
 
 
 def train(rank, args, shared_model, optimizer, env_conf, frames_total):
     ptitle(f"Train Agent: {rank}")
-    gpu_id = args.gpu_ids[rank % len(args.gpu_ids)]
     torch.manual_seed(args.seed + rank)
-    if gpu_id >= 0:
-        torch.cuda.manual_seed(args.seed + rank)
-    hidden_size = args.hidden_size
     env = atari_env(args.env, env_conf, args)
-    if optimizer is None:
-        if args.optimizer == 'RMSprop':
-            optimizer = optim.RMSprop(shared_model.parameters(), lr=args.lr)
-        if args.optimizer == 'Adam':
-            optimizer = optim.Adam(
-                shared_model.parameters(), lr=args.lr, amsgrad=args.amsgrad)
     env.seed(args.seed + rank)
     player = Agent(None, env, args, None)
-    player.gpu_id = gpu_id
-    player.model = getattr(model, args.model_type)(player.env.observation_space.shape[0], player.env.action_space, args)
-
-    player.state = player.env.reset()
-    if gpu_id >= 0:
-        with torch.cuda.device(gpu_id):
-            player.state = torch.from_numpy(player.state).float().cuda()
-            player.model = player.model.cuda()
-    else:
-        player.state = torch.from_numpy(player.state).float()
+    player.model = model.A3CRules2378OracleTwoLevelMemory(
+        player.env.observation_space.shape[0], player.env.action_space, args
+    )
+    player.state = torch.from_numpy(player.env.reset()).float()
     player.model.train()
-    if len(args.distributed_step_size) > 0:
-        num_steps = args.distributed_step_size[rank%len(args.distributed_step_size)]
-    else:
-        num_steps = args.num_steps
+
+    log_dir_path = f"{args.log_dir}{args.experiment_name}/"
+    os.makedirs(log_dir_path, exist_ok=True)
+    loss_csv_path = f"{log_dir_path}losses_rank{rank}.csv"
+    with open(loss_csv_path, 'w', newline='') as csvfile:
+        csv.writer(csvfile).writerow(
+            ['batch_num', 'policy_loss', 'value_loss', 'restoration_loss', 'value_intrinsic_loss']
+        )
+    cosine_csv_path = f"{log_dir_path}cosine_const_rank{rank}.csv"
+    with open(cosine_csv_path, 'w', newline='') as csvfile:
+        csv.writer(csvfile).writerow(['batch_num', 'step_idx', 'cosine_const'])
 
     game_count = 0
     batch_count = 0
-    loss_csv_path = None
-    cosine_csv_path = None
-    last_save = 0
-    if args.monitor_losses:
-        log_dir_path = f"{args.log_dir}{args.experiment_name}/"
-        os.makedirs(log_dir_path, exist_ok=True)
-        loss_csv_path = f"{log_dir_path}losses_rank{rank}.csv"
-        with open(loss_csv_path, 'w', newline='') as csvfile:
-            writer = csv.writer(csvfile)
-            writer.writerow(['batch_num', 'policy_loss', 'value_loss', 'kld_loss', 'restoration_loss', 'value_intrinsic_loss'])
-    if args.monitor_cosine_const:
-        log_dir_path = f"{args.log_dir}{args.experiment_name}/"
-        os.makedirs(log_dir_path, exist_ok=True)
-        cosine_csv_path = f"{log_dir_path}cosine_const_rank{rank}.csv"
-        with open(cosine_csv_path, 'w', newline='') as csvfile:
-            writer = csv.writer(csvfile)
-            writer.writerow(['batch_num', 'step_idx', 'cosine_const'])
     try:
-        while 1:
-            if gpu_id >= 0:
-                with torch.cuda.device(gpu_id):
-                    player.model.load_state_dict(shared_model.state_dict())
-            else:
-                player.model.load_state_dict(shared_model.state_dict())
-            if player.done:
-                if gpu_id >= 0:
-                    with torch.cuda.device(gpu_id):
-                        player.cx = torch.zeros(1, hidden_size).cuda()
-                        player.hx = torch.zeros(1, hidden_size).cuda()
-                else:
-                    player.cx = torch.zeros(1, hidden_size)
-                    player.hx = torch.zeros(1, hidden_size)
-            else:
-                player.cx = player.cx.data
-                player.hx = player.hx.data
-            for step in range(num_steps):
-                player.action_train()
+        while True:
+            player.model.load_state_dict(shared_model.state_dict())
 
+            # ---------------------------------------------------------------
+            # 1. Play one batch
+            # ---------------------------------------------------------------
+            for step in range(args.num_steps):
+                player.action_train()
                 if player.done:
                     break
+            n_steps = len(player.rewards)
 
+            # ---------------------------------------------------------------
+            # 2. Values at the state after the batch (the "tail")
+            #    After a lost life there is no next state: everything is zero.
+            # ---------------------------------------------------------------
             if player.done:
-                game_count += 1
-                if args.monitor_s and (game_count % args.monitor_s_save_interval == 0 or game_count == 1):
-                    # Save s values for this game
-                    s_data = {
-                        'game': game_count,
-                        'rank': rank,
-                        's_values': player.model.s_values
-                    }
-                    log_dir_path = f"{args.log_dir}{args.experiment_name}/"
-                    os.makedirs(log_dir_path, exist_ok=True)
-                    save_path = f"{log_dir_path}s_monitor_{args.env}_rank{rank}_game{game_count}.pkl"
-                    print(f"Saving s monitoring data to: {save_path}")
-                    with open(save_path, 'wb') as f:
-                        pickle.dump(s_data, f)
-                    # Check if file was saved successfully
-                    if os.path.exists(save_path):
-                        print(f"S monitoring data saved successfully: {save_path}")
-                    else:
-                        print(f"ERROR: Failed to save s monitoring data to: {save_path}")
-                    # Clear s values for next games
-                player.model.s_values = []
-
-                player.eps_len = 0
-                state = player.env.reset()
-                if gpu_id >= 0:
-                    with torch.cuda.device(gpu_id):
-                        player.state = torch.from_numpy(state).float().cuda()
-                else:
-                    player.state = torch.from_numpy(state).float()
-
-            if gpu_id >= 0:
-                with torch.cuda.device(gpu_id):
-                    R = torch.zeros(1, 1).cuda()
-                    R_intrinsic = torch.zeros(1, 1).cuda()
-                    gae = torch.zeros(1, 1).cuda()
-                    R2 = torch.zeros(1, 1).cuda()
-                    R_intrinsic2 = torch.zeros(1, 1).cuda()
-                    gae2 = torch.zeros(1, 1).cuda()
-                    gae_intrinsic = torch.zeros(1, 1).cuda()
+                value_tail = torch.zeros(1, 1)
+                value_intrinsic_tail = torch.zeros(1, 1)
+                value2_tail = torch.zeros(1, 1)
+                value_intrinsic2_tail = torch.zeros(1, 1)
+                oracle1_target = torch.zeros_like(player.oracle1_predictions[-1])
+                oracle2_target = torch.zeros_like(player.oracle2_predictions[-1])
             else:
-                R = torch.zeros(1, 1)
-                R_intrinsic = torch.zeros(1, 1)
-                gae = torch.zeros(1, 1)
-                R2 = torch.zeros(1, 1)
-                R_intrinsic2 = torch.zeros(1, 1)
-                gae2 = torch.zeros(1, 1)
-                gae_intrinsic = torch.zeros(1, 1)
-            oracle_bootstrap = None
-            oracle2_bootstrap = None
-            if not player.done:
-                state = player.state
-                model_output = player.model(
-                    state.unsqueeze(0),
-                    player.hx,
-                    player.cx,
-                    option_index=player.actions2[-1],
+                # Keep the option that played last: it has not ended yet.
+                tail = player.model(
+                    player.state.unsqueeze(0), player.previous_s1, option=player.options[-1]
                 )
-                value = model_output[0]
-                R = value.detach()
-                R_intrinsic = model_output[5].detach()
-                R2 = model_output[6].detach()
-                oracle_bootstrap = model_output[4].detach()
-                oracle2_bootstrap = model_output[-1].detach()
-                player.s1_states.append(model_output[-3])
-                player.s2_states.append(model_output[-2])
-                R_intrinsic2 = model_output[-4].detach()
-            player.values.append(R)
-            player.values_intrinsic.append(R_intrinsic)
-            player.values2.append(R2)
-            player.values_intrinsic2.append(R_intrinsic2)
+                value_tail = tail['value'].detach()
+                value_intrinsic_tail = tail['value_intrinsic'].detach()
+                value2_tail = tail['value2'].detach()
+                value_intrinsic2_tail = tail['value_intrinsic2'].detach()
+                oracle1_target = tail['oracle1_prediction'].detach()
+                oracle2_target = tail['oracle2_prediction'].detach()
+                player.s1_states.append(tail['s1'].detach())
+                player.s2_states.append(tail['s2'])
+
+            # ---------------------------------------------------------------
+            # 3. Walk the batch backwards and add up the losses
+            # ---------------------------------------------------------------
+            num_options = player.model.num_options
+            returns_external = [None] * num_options     # level 1, one return per option
+            returns_intrinsic = [None] * num_options    # level 1, one return per option
+            return2 = value2_tail                       # level 2
+            return_intrinsic2 = value_intrinsic2_tail   # level 2
+
             policy_loss = 0
+            policy_loss2 = 0
             value_loss = 0
+            value_loss2 = 0
             value_intrinsic_loss = 0
             value_intrinsic2_loss = 0
             restoration_loss = 0
-            policy_loss2 = 0
-            value_loss2 = 0
             cosine_const_values = []
-            
-            if len(player.rewards) > 0:
-                if len(player.s1_states) != len(player.rewards) + 1:
-                    raise ValueError('s1 transitions are misaligned')
-                if len(player.s2_states) != len(player.rewards) + 1:
-                    raise ValueError('s2 transitions are misaligned')
-                if oracle_bootstrap is None:
-                    G_t = torch.zeros_like(player.x_restoreds[-1])
+
+            for i in reversed(range(n_steps)):
+                option = player.options[i].item()
+                is_last_step = (i == n_steps - 1)
+                episode_ended_here = player.done and is_last_step
+                option_ended_here = (not is_last_step) and player.options[i + 1].item() != option
+
+                # --- Level 1 external critic -------------------------------
+                # An option met for the first time starts from the value at the state
+                # where it stopped: the batch tail, or the value stored when it ended.
+                if is_last_step:
+                    start_value = value_tail
                 else:
-                    G_t = oracle_bootstrap
-                if oracle2_bootstrap is None:
-                    G2 = torch.zeros_like(player.oracle2_preds[-1])
-                else:
-                    G2 = oracle2_bootstrap
-                num_options = player.model.num_options
-                active_ext = [False] * num_options
-                returns_ext = [None] * num_options
-                active_int = [False] * num_options
-                returns_int = [None] * num_options
-                external_batch_tail = player.values[-1].detach()
-                intrinsic_batch_tail = player.values_intrinsic[-1].detach()
-                R2 = player.values2[-1].detach()
-            for i in reversed(range(len(player.rewards))):
-                option_id = _option_index(player.actions2[i])
-                n_steps = len(player.rewards)
-                external_tail = None
-                if not active_ext[option_id]:
-                    external_tail = activation_bootstrap(
-                        i, n_steps, external_batch_tail,
-                        player.option_end_values,
-                    )
-                R1 = option_activation_returns(
-                    active_ext, returns_ext, option_id,
-                    player.rewards[i], args.gamma, external_tail,
+                    start_value = player.option_end_values[i]
+                return1 = update_option_returns(
+                    returns_external, option, player.rewards[i], args.gamma, start_value
                 )
-                advantage = R1 - player.values[i]
-                value_loss = value_loss + 0.5 * advantage.pow(2)
+                advantage1 = return1 - player.values[i]
+                value_loss = value_loss + 0.5 * advantage1.pow(2)
 
-                delta_t = advantage.detach()
-
-                R2 = args.gamma2 * R2 + (1.0 - args.gamma) * R1
-                advantage2 = R2 - player.values2[i]
-                delta2 = advantage2.detach()
+                # --- Level 2 external critic -------------------------------
+                # Its reward is the level-1 return, scaled by (1 - gamma).
+                return2 = args.gamma2 * return2 + (1.0 - args.gamma) * return1
+                advantage2 = return2 - player.values2[i]
                 value_loss2 = value_loss2 + 0.5 * advantage2.pow(2)
 
-                episode_ended = player.done and i + 1 == len(player.rewards)
-                option_ended = (
-                    i + 1 < n_steps
-                    and option_id != _option_index(player.actions2[i + 1])
-                )
-                oracle_plug = None
-                if option_ended:
-                    oracle_plug = player.option_end_oracle[i]
-                G_t = oracle_option_target(
-                    G_t,
-                    player.s1_states[i + 1] - player.s1_states[i],
-                    args.gamma_oracle,
-                    option_ended or episode_ended,
-                    oracle_plug,
-                )
-                G_const = G_t.detach().view(-1)
+                # --- Oracle 1 ----------------------------------------------
+                # Target: discounted change of s1 until the end of the current option.
+                # When the option ends here, the future part comes from the guess of the
+                # finished option at the state where it ended.
+                # When a life is lost here, the target is zero.
+                s1_change = player.s1_states[i + 1] - player.s1_states[i]
+                if episode_ended_here:
+                    oracle1_target = torch.zeros_like(s1_change)
+                else:
+                    if option_ended_here:
+                        oracle1_target = player.option_end_oracle1[i]
+                    oracle1_target = args.gamma_oracle * oracle1_target.detach() + s1_change
+                oracle1_guess = player.oracle1_predictions[i].view(-1)
+                oracle1_target_flat = oracle1_target.detach().view(-1)
 
-                cosine_const = F.cosine_similarity(
-                    player.x_restoreds[i].detach().view(-1),
-                    G_const,
-                    dim=0
-                ).squeeze(0)
-                cosine_const_values.append(cosine_const.item())
-                oracle_r = (1.0 - args.gamma) * cosine_const
-
-                intrinsic_tail = None
-                if not active_int[option_id]:
-                    intrinsic_tail = activation_bootstrap(
-                        i, n_steps, intrinsic_batch_tail,
-                        player.option_end_intrinsic,
-                    )
-                R_intrinsic = option_activation_returns(
-                    active_int, returns_int, option_id,
-                    oracle_r, args.gamma, intrinsic_tail,
-                )
-                intrinsic_advantage = R_intrinsic - player.values_intrinsic[i]
-                value_intrinsic_loss = value_intrinsic_loss + 0.5 * intrinsic_advantage.pow(2)
-
-                delta_t_intrinsic = intrinsic_advantage.detach()
-
-                cosine_restoreds = -F.cosine_similarity(
-                    player.x_restoreds[i].view(-1),
-                    G_const,
-                    dim=0,
-                )
-                restoration_loss = restoration_loss + external_advantage_restoration(
-                    cosine_restoreds, delta_t + delta2, args.w_restoration_loss
+                cosine1 = F.cosine_similarity(oracle1_guess, oracle1_target_flat, dim=0)
+                restoration_loss = restoration_loss + (
+                    args.w_restoration_loss * (-cosine1) * (advantage1.detach() + advantage2.detach())
                 )
 
-                batch_ended = player.done and i + 1 == len(player.rewards)
-                G2 = oracle_option_target(
-                    G2,
-                    player.s2_states[i + 1] - player.s2_states[i],
-                    args.gamma_oracle2,
-                    batch_ended,
+                # --- Level 1 intrinsic critic ------------------------------
+                cosine1_const = cosine1.detach()
+                cosine_const_values.append(cosine1_const.item())
+                oracle1_reward = (1.0 - args.gamma) * cosine1_const
+                if is_last_step:
+                    start_value = value_intrinsic_tail
+                else:
+                    start_value = player.option_end_values_intrinsic[i]
+                return_intrinsic1 = update_option_returns(
+                    returns_intrinsic, option, oracle1_reward, args.gamma, start_value
                 )
-                cosine2 = -F.cosine_similarity(
-                    player.oracle2_preds[i].view(-1),
-                    G2.detach().view(-1),
-                    dim=0,
-                )
-                restoration_loss = restoration_loss + external_advantage_restoration(
-                    cosine2, delta2, args.w_restoration_loss,
-                )
-                cosine_const2 = F.cosine_similarity(
-                    player.oracle2_preds[i].detach().view(-1),
-                    G2.detach().view(-1),
-                    dim=0,
-                ).squeeze(0)
-                oracle_r2 = (1.0 - args.gamma2) * cosine_const2
-                R_intrinsic2 = level2_batch_return_step(
-                    R_intrinsic2, oracle_r2, args.gamma2,
-                )
-                advantage_intrinsic2 = R_intrinsic2 - player.values_intrinsic2[i]
-                value_intrinsic2_loss = (
-                    value_intrinsic2_loss + 0.5 * advantage_intrinsic2.pow(2)
+                advantage_intrinsic1 = return_intrinsic1 - player.values_intrinsic[i]
+                value_intrinsic_loss = value_intrinsic_loss + 0.5 * advantage_intrinsic1.pow(2)
+
+                # --- Oracle 2 ----------------------------------------------
+                # Target: discounted change of s2 (options do not matter here).
+                s2_change = player.s2_states[i + 1] - player.s2_states[i]
+                if episode_ended_here:
+                    oracle2_target = torch.zeros_like(s2_change)
+                else:
+                    oracle2_target = args.gamma_oracle2 * oracle2_target.detach() + s2_change
+                oracle2_guess = player.oracle2_predictions[i].view(-1)
+                oracle2_target_flat = oracle2_target.detach().view(-1)
+
+                cosine2 = F.cosine_similarity(oracle2_guess, oracle2_target_flat, dim=0)
+                restoration_loss = restoration_loss + (
+                    args.w_restoration_loss * (-cosine2) * advantage2.detach()
                 )
 
-                gae = delta_t
-                gae_intrinsic = delta_t_intrinsic
-                policy1_i, policy2_i = oracle_two_level_actor_loss(
-                    player.log_probs[i],
-                    gae_intrinsic,
-                    player.entropies[i],
-                    player.log_probs2[i],
-                    advantage_intrinsic2.detach(),
-                    player.entropies2[i],
-                    args.entropy_coef,
+                # --- Level 2 intrinsic critic ------------------------------
+                oracle2_reward = (1.0 - args.gamma2) * cosine2.detach()
+                return_intrinsic2 = args.gamma2 * return_intrinsic2 + oracle2_reward
+                advantage_intrinsic2 = return_intrinsic2 - player.values_intrinsic2[i]
+                value_intrinsic2_loss = value_intrinsic2_loss + 0.5 * advantage_intrinsic2.pow(2)
+
+                # --- Actors ------------------------------------------------
+                # Both actors follow their level's intrinsic advantage.
+                policy_loss = (
+                    policy_loss
+                    - player.log_probs[i] * advantage_intrinsic1.detach()
+                    - args.entropy_coef * player.entropies[i]
                 )
-                policy_loss = policy_loss + policy1_i
-                policy_loss2 = policy_loss2 + policy2_i
+                policy_loss2 = (
+                    policy_loss2
+                    - player.log_probs2[i] * advantage_intrinsic2.detach()
+                    - args.entropy_coef * player.entropies2[i]
+                )
 
-            kld_loss = 0
-
-            value_loss = value_loss + value_loss2
-            value_intrinsic_loss = value_intrinsic_loss + value_intrinsic2_loss
+            # ---------------------------------------------------------------
+            # 4. Update the shared model
+            # ---------------------------------------------------------------
             total_loss = (
                 policy_loss
                 + policy_loss2
-                + 0.5 * value_loss
-                + 0.5 * value_intrinsic_loss
-                + kld_loss
+                + 0.5 * (value_loss + value_loss2)
+                + 0.5 * (value_intrinsic_loss + value_intrinsic2_loss)
                 + restoration_loss
             )
-            player.model.zero_grad()
+            # Zero in place: the shared model keeps pointing at these gradient tensors.
+            player.model.zero_grad(set_to_none=False)
             total_loss.backward()
-            ensure_shared_grads(player.model, shared_model, gpu=gpu_id >= 0)
+            ensure_shared_grads(player.model, shared_model)
             optimizer.step()
 
-            # Detach prev_shared at the batch boundary: the model keeps the graph in
-            # prev_shared for within-rollout BPTT (see _SharedFeatureDiffMixin); detaching it
-            # here stops the next batch's first diff from backpropagating into this freed graph.
-            if getattr(player.model, 'prev_shared', None) is not None:
-                player.model.prev_shared = player.model.prev_shared.detach()
-            if getattr(player.model, 'memdiff_sum', None) is not None:
-                player.model.memdiff_sum = player.model.memdiff_sum.detach()
+            # The memory keeps gradients inside one batch only.
+            if player.previous_s1 is not None:
+                player.previous_s1 = player.previous_s1.detach()
 
-            if args.save_model_steps > 0 and frames_total.value // args.save_model_steps > last_save and rank == 0:
-                last_save = frames_total.value // args.save_model_steps
-                log_dir_path = f"{args.log_dir}{args.experiment_name}/"
-                os.makedirs(log_dir_path, exist_ok=True)
-                torch.save(shared_model.state_dict(), f"{log_dir_path}model_{frames_total.value}.dat")
+            # ---------------------------------------------------------------
+            # 5. Logs
+            # ---------------------------------------------------------------
+            batch_count += 1
+            with open(loss_csv_path, 'a', newline='') as csvfile:
+                csv.writer(csvfile).writerow([
+                    batch_count,
+                    policy_loss.item(),
+                    (0.5 * (value_loss + value_loss2)).item(),
+                    restoration_loss.item(),
+                    (0.5 * (value_intrinsic_loss + value_intrinsic2_loss)).item(),
+                ])
+            with open(cosine_csv_path, 'a', newline='') as csvfile:
+                writer = csv.writer(csvfile)
+                for step_idx, cosine_const in enumerate(cosine_const_values):
+                    writer.writerow([batch_count, step_idx, cosine_const])
 
-            # Save losses to CSV if monitoring is enabled
-            if args.monitor_losses or args.monitor_cosine_const:
-                batch_count += 1
-            if args.monitor_losses:
-                with open(loss_csv_path, 'a', newline='') as csvfile:
-                    writer = csv.writer(csvfile)
-                    writer.writerow([
-                        batch_count,
-                        policy_loss.item(),
-                        (0.5 * value_loss).item(),
-                        kld_loss.item() if isinstance(kld_loss, torch.Tensor) else kld_loss,
-                        restoration_loss.item() if isinstance(restoration_loss, torch.Tensor) else restoration_loss,
-                        (0.5 * value_intrinsic_loss).item() if isinstance(value_intrinsic_loss, torch.Tensor) else 0.5 * value_intrinsic_loss,
-                    ])
-
-            if args.monitor_cosine_const:
-                with open(cosine_csv_path, 'a', newline='') as csvfile:
-                    writer = csv.writer(csvfile)
-                    for step_idx, cosine_const in enumerate(cosine_const_values):
-                        writer.writerow([batch_count, step_idx, cosine_const])
+            # ---------------------------------------------------------------
+            # 6. After a lost life: save s1 monitoring and reset the game
+            # ---------------------------------------------------------------
+            if player.done:
+                game_count += 1
+                if game_count % args.monitor_s_save_interval == 0 or game_count == 1:
+                    save_path = f"{log_dir_path}s_monitor_{args.env}_rank{rank}_game{game_count}.pkl"
+                    with open(save_path, 'wb') as f:
+                        pickle.dump(
+                            {'game': game_count, 'rank': rank, 's_values': player.s1_history}, f
+                        )
+                    print(f"S monitoring data saved: {save_path}")
+                player.s1_history = []
+                player.eps_len = 0
+                player.state = torch.from_numpy(player.env.reset()).float()
 
             player.clear_actions()
-            steps_taken = step + 1 if player.done else num_steps
-            frames_total.value += steps_taken
+            frames_total.value += n_steps
             if frames_total.value > args.total_steps_stop:
                 break
     except KeyboardInterrupt:

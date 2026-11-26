@@ -1,128 +1,70 @@
+"""Small shared tools: logging, config reading, checkpoints, gradient sharing."""
 from __future__ import division
 import glob
 import json
 import logging
 import os
 
-import numpy as np
 import torch
 
 
 def setup_logger(logger_name, log_file, level=logging.INFO):
+    """Log both to a file and to the screen."""
     l = logging.getLogger(logger_name)
     formatter = logging.Formatter('%(asctime)s : %(message)s')
     fileHandler = logging.FileHandler(log_file, mode='w')
     fileHandler.setFormatter(formatter)
     streamHandler = logging.StreamHandler()
     streamHandler.setFormatter(formatter)
-
     l.setLevel(level)
     l.addHandler(fileHandler)
     l.addHandler(streamHandler)
 
 
 def read_config(file_path):
-    """Read JSON config."""
-    json_object = json.load(open(file_path, 'r'))
-    return json_object
+    """Read a JSON config."""
+    with open(file_path, 'r') as f:
+        return json.load(f)
 
 
-def model_checkpoint_dir(args):
-    """Directory of best/latest weights for this run.
+def save_checkpoint(state_dict, args, kind, steps, score):
+    """Save model weights and delete the previous file of the same kind.
 
-    Args:
-        args: Run config. Uses ``log_dir``, ``experiment_name``, ``parallel_id``.
-
-    Returns:
-        Path ``{log_dir}/{experiment_name}/models/p{parallel_id}``.
-    """
-    return os.path.join(args.log_dir, args.experiment_name, "models", f"p{args.parallel_id}")
-
-
-def format_score(score):
-    """Format a score for a checkpoint filename.
+    The file goes to ``{log_dir}{experiment_name}/models/p{parallel_id}/`` and is
+    named like ``best_steps1200_score21.dat`` (a score of 2.5 is written ``2p50``).
 
     Args:
-        score: Episode return.
-
-    Returns:
-        Integer text, or a float with ``.`` replaced by ``p``.
-    """
-    if score == int(score):
-        return str(int(score))
-    return f"{score:.2f}".replace('.', 'p')
-
-
-def checkpoint_filename(kind, steps, score=None):
-    """Build a checkpoint filename.
-
-    Args:
+        state_dict: Model weights.
+        args: Run config.
         kind: ``latest`` or ``best``.
-        steps: Environment steps at save time.
-        score: Episode return. Omitted from the name when missing.
+        steps: frames_total at save time.
+        score: Game score.
 
     Returns:
-        Filename ending in ``.dat``.
+        Path of the saved file.
     """
-    if score is not None:
-        return f"{kind}_steps{steps}_score{format_score(score)}.dat"
-    return f"{kind}_steps{steps}.dat"
-
-
-def save_checkpoint(state_dict, args, kind, steps, score=None, replace_previous=True):
-    """Save weights and drop the previous file of the same kind.
-
-    Args:
-        state_dict: Model ``state_dict``.
-        args: Run config. Passed to ``model_checkpoint_dir``.
-        kind: ``latest`` or ``best``.
-        steps: Environment steps at save time.
-        score: Episode return stored in the filename.
-        replace_previous: Delete older ``{kind}_*.dat`` in the same directory.
-
-    Returns:
-        Path of the written file.
-    """
-    save_dir = model_checkpoint_dir(args)
+    save_dir = os.path.join(args.log_dir, args.experiment_name, "models", f"p{args.parallel_id}")
     os.makedirs(save_dir, exist_ok=True)
-    if replace_previous:
-        for path in glob.glob(os.path.join(save_dir, f"{kind}_*.dat")):
-            os.remove(path)
-    path = os.path.join(save_dir, checkpoint_filename(kind, steps, score))
+    for old_path in glob.glob(os.path.join(save_dir, f"{kind}_*.dat")):
+        os.remove(old_path)
+    if score == int(score):
+        score_text = str(int(score))
+    else:
+        score_text = f"{score:.2f}".replace('.', 'p')
+    path = os.path.join(save_dir, f"{kind}_steps{steps}_score{score_text}.dat")
     torch.save(state_dict, path)
     return path
 
 
-def norm_col_init(weights, std=1.0):
-    x = torch.randn(weights.size())
-    x *= std / torch.sqrt((x**2).sum(1, keepdim=True))
-    return x
+def ensure_shared_grads(model, shared_model):
+    """Point the shared model's gradients at this worker's gradients.
 
-
-def ensure_shared_grads(model, shared_model, gpu=False):
-    for param, shared_param in zip(model.parameters(),
-                                   shared_model.parameters()):
-        if shared_param.grad is not None and not gpu:
+    Each worker process has its own view of the shared model, so this link is
+    per worker. It is made once: after that the shared gradients already point
+    at this worker's gradient tensors, so the loop stops early. That is why
+    train.py zeroes gradients in place (zero_grad(set_to_none=False)).
+    """
+    for param, shared_param in zip(model.parameters(), shared_model.parameters()):
+        if shared_param.grad is not None:
             return
-        elif not gpu:
-            shared_param._grad = param.grad
-        else:
-            shared_param._grad = param.grad.cpu()
-
-
-def weights_init(m):
-    classname = m.__class__.__name__
-    if classname.find('Conv') != -1:
-        weight_shape = list(m.weight.data.size())
-        fan_in = np.prod(weight_shape[1:4])
-        fan_out = np.prod(weight_shape[2:4]) * weight_shape[0]
-        w_bound = np.sqrt(6. / (fan_in + fan_out))
-        m.weight.data.uniform_(-w_bound, w_bound)
-        m.bias.data.fill_(0)
-    elif classname.find('Linear') != -1:
-        weight_shape = list(m.weight.data.size())
-        fan_in = weight_shape[1]
-        fan_out = weight_shape[0]
-        w_bound = np.sqrt(6. / (fan_in + fan_out))
-        m.weight.data.uniform_(-w_bound, w_bound)
-        m.bias.data.fill_(0)
+        shared_param._grad = param.grad

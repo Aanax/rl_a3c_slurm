@@ -1,308 +1,132 @@
+"""
+The agent: plays the game with the model and writes down everything train.py needs.
+
+action_train() plays one step while training and stores it.
+action_test()  plays one step greedily (used by test.py), stores nothing.
+clear_actions() empties the stored steps after each training batch.
+"""
 from __future__ import division
 import os
 os.environ["OMP_NUM_THREADS"] = "1"
 import torch
 import torch.nn.functional as F
-from torch.autograd import Variable
-import model as model_module
 
 
 class Agent(object):
     def __init__(self, model, env, args, state):
         self.model = model
         self.env = env
-        self.state = state
-        self.hx = None
-        self.cx = None
-        self.eps_len = 0
         self.args = args
-        self.values = []
-        self.values2 = []  # V2 values for hierarchical models
-        self.values_intrinsic = []
-        self.values_intrinsic2 = []
-        self.log_probs = []
-        self.log_probs2 = []  # Actor2 log probs for hierarchical models
-        self.rewards = []
-        self.entropies = []
-        self.entropies2 = []  # Actor2 entropies for hierarchical models
-        self.actions2 = []
-        self.x_restoreds = []
-        self.oracle2_preds = []
-        self.s1_states = []
-        self.s2_states = []
-        self.option_end_values = []
-        self.option_end_intrinsic = []
-        self.option_end_oracle = []
-        self.kls = []
-        self.states = []
-        self.next_states = []
-        self.shared_states = []
+        self.state = state
         self.done = True
         self.info = None
         self.reward = 0
-        self.gpu_id = -1
-        self.hidden_size = args.hidden_size
-
-    def _store_option(self, logit2, action2, value2):
-        """Record the option already sampled inside the model.
-
-        Args:
-            logit2: Option-policy logits.
-            action2: Sampled option index.
-            value2: Level-2 value at this step.
-        """
-        prob2 = F.softmax(logit2, dim=1)
-        log_prob2 = F.log_softmax(logit2, dim=1)
-        entropy2 = -(log_prob2 * prob2).sum(1)
-        self.entropies2.append(entropy2)
-        self.log_probs2.append(log_prob2.gather(1, action2))
-        self.values2.append(value2)
-        self.actions2.append(action2)
-
-    def _store_hidden_transition(self, s1, s2, pred_s2):
-        """Record hidden states and the level-2 oracle prediction.
-
-        Args:
-            s1: Detached shared-encoder map at this step.
-            s2: Detached level-2 feature map at this step.
-            pred_s2: Level-2 oracle prediction at this step.
-        """
-        self.s1_states.append(s1)
-        self.s2_states.append(s2)
-        self.oracle2_preds.append(pred_s2)
-        if self.done:
-            self.s1_states.append(torch.zeros_like(s1))
-            self.s2_states.append(torch.zeros_like(s2))
-
-    def _as_option_id(self, option_id):
-        """Read one option index out of a tensor or a plain number.
-
-        Args:
-            option_id: Option index stored on the player or returned by the model.
-
-        Returns:
-            Python int option index.
-        """
-        if torch.is_tensor(option_id):
-            return int(option_id.view(-1)[0].item())
-        return int(option_id)
-
-    def _remember_finished_option(self, state, finished_option):
-        """Store the level-1 bootstraps of a finished option.
-
-        Args:
-            state: Observation at the boundary, shape ``[1, ...]``.
-            finished_option: Option index that ended before the current step.
-        """
-        saved_prev = self.model.prev_shared
-        saved_sum = getattr(self.model, 'memdiff_sum', None)
-        saved_count = getattr(self.model, 'memdiff_count', 0)
-        with torch.no_grad():
-            output = self.model(
-                state, self.hx, self.cx, option_index=finished_option,
-            )
-        self.model.prev_shared = saved_prev
-        if hasattr(self.model, 'memdiff_sum'):
-            self.model.memdiff_sum = saved_sum
-            self.model.memdiff_count = saved_count
-        self.option_end_values[-1] = output[0].detach()
-        self.option_end_intrinsic[-1] = output[5].detach()
-        self.option_end_oracle[-1] = output[4].detach()
+        self.eps_len = 0
+        # Memory: s1 of the previous step. None at the start of an episode.
+        self.previous_s1 = None
+        # s1 of every step of the current game, for monitoring. train.py saves and clears it.
+        self.s1_history = []
+        self.clear_actions()
 
     def action_train(self):
+        state = self.state.unsqueeze(0)
+        out = self.model(state, self.previous_s1)
 
-        current_state = self.state.unsqueeze(0)
-        finished_option = None
-        if (
-            isinstance(self.model, model_module.A3CRules2378OracleTwoLevel)
-            and self.actions2
-        ):
-            finished_option = self.actions2[-1]
-        model_output = self.model(
-            current_state, self.hx, self.cx, None
-        )
-        if isinstance(self.model, model_module._FutureSharedDiffTargetMixin):
-            shared_t = model_output[-1].detach()
-            model_output = model_output[:-1]
-        else:
-            shared_t = None
-        pred_s2 = None
-        if isinstance(self.model, model_module.A3CRules2378OracleTwoLevel):
-            value_intrinsic2 = model_output[-4]
-            s1_t = model_output[-3]
-            s2_t = model_output[-2]
-            pred_s2 = model_output[-1]
-            (
-                value, logit, self.hx, self.cx, x_restored, value_intrinsic,
-                value2, logit2, action2,
-            ) = model_output[:-4]
-            kl = None
-        elif len(model_output) == 4:
-            value, logit, self.hx, self.cx = model_output
-            x_restored = None
-            kl = None
-            value_intrinsic = None
-            value2 = None
-            logit2 = None
-            action2 = None
-        elif len(model_output) == 5:
-            value, logit, self.hx, self.cx, x_restored = model_output
-            kl = None
-            value2 = None
-            logit2 = None
-            value_intrinsic = None
-            action2 = None
-        elif len(model_output) == 6:
-            if isinstance(self.model, (model_module.A3CRules2378OracleIntrinsicCritic, model_module.A3CRules2378OracleFCIntrinsicCritic, model_module._IntrinsicCriticMixin)):
-                value, logit, self.hx, self.cx, x_restored, value_intrinsic = model_output
-                kl = None
-            else:
-                value, logit, self.hx, self.cx, x_restored, kl = model_output
-                value_intrinsic = None
-            value2 = None
-            logit2 = None
-            action2 = None
-        elif len(model_output) == 8:
-            # Hierarchical model: V1, a1, hx, cx, None, None, V2, a2
-            value, logit, self.hx, self.cx, _, _, value2, logit2 = model_output
-            x_restored = None
-            kl = None
-            action2 = None
-        else:
-            raise ValueError(f"Unexpected model output length: {len(model_output)}. Expected 4, 5, 6, or 8.")
-        
-        prob = F.softmax(logit, dim=1)
-        log_prob = F.log_softmax(logit, dim=1)
-        entropy = -(log_prob * prob).sum(1)
-        self.entropies.append(entropy)
-        action = prob.multinomial(1).data
-        log_prob = log_prob.gather(1, action)
-        
-        if action2 is not None:
-            if (
-                finished_option is not None
-                and self._as_option_id(action2) != self._as_option_id(finished_option)
-            ):
-                self._remember_finished_option(current_state, finished_option)
-            self._store_option(logit2, action2, value2)
-        elif logit2 is not None:
-            prob2 = F.softmax(logit2, dim=1)
-            log_prob2 = F.log_softmax(logit2, dim=1)
-            entropy2 = -(log_prob2 * prob2).sum(1)
-            self.entropies2.append(entropy2)
-            action2 = prob2.multinomial(1).data
-            log_prob2 = log_prob2.gather(1, action2)
-            self.log_probs2.append(log_prob2)
-            self.values2.append(value2)
-        state, self.reward, self.done, self.info = self.env.step(
-            action.item())
-        if self.gpu_id >= 0:
-            with torch.cuda.device(self.gpu_id):
-                self.state = torch.from_numpy(state).float().cuda()
-        else:
-            self.state = torch.from_numpy(state).float()
+        # Level 1: sample the game action
+        action_prob = F.softmax(out['action_logits'], dim=1)
+        action_log_prob = F.log_softmax(out['action_logits'], dim=1)
+        action_entropy = -(action_log_prob * action_prob).sum(1)
+        action = action_prob.multinomial(1).data
 
-        if shared_t is not None:
-            self.shared_states.append(shared_t)
-            if self.done:
-                self.shared_states.append(
-                    self.model.terminal_next_shared(self.state.unsqueeze(0))
-                )
+        # Level 2: the option was already sampled inside the model
+        option = out['option']
+        option_prob = F.softmax(out['option_logits'], dim=1)
+        option_log_prob = F.log_softmax(out['option_logits'], dim=1)
+        option_entropy = -(option_log_prob * option_prob).sum(1)
 
-        if self.done:
-            if hasattr(self.model, 'running_mem'):
-                self.model.running_mem = torch.zeros_like(self.model.running_mem)
-            if hasattr(self.model, 'prev_x_conv'):
-                self.model.prev_x_conv = None
-            if hasattr(self.model, 'prev_shared'):
-                self.model.prev_shared = None
-            if hasattr(self.model, 'memdiff_sum'):
-                self.model.memdiff_sum = None
-                self.model.memdiff_count = 0
+        # If the option has just changed, the previous option ended at this state.
+        # Ask the model what the previous option would see here: these values close
+        # the previous option's returns in train.py. They go into the previous step's slot.
+        if len(self.options) > 0 and option.item() != self.options[-1].item():
+            with torch.no_grad():
+                finished = self.model(state, self.previous_s1, option=self.options[-1])
+            self.option_end_values[-1] = finished['value']
+            self.option_end_values_intrinsic[-1] = finished['value_intrinsic']
+            self.option_end_oracle1[-1] = finished['oracle1_prediction']
 
-        self.eps_len += 1
+        # Play the action
+        next_state, self.reward, self.done, self.info = self.env.step(action.item())
+        self.state = torch.from_numpy(next_state).float()
         self.reward = max(min(self.reward, 1), -1)
-        self.values.append(value)
-        self.values_intrinsic.append(value_intrinsic if value_intrinsic is not None else value.detach())
-        self.log_probs.append(log_prob)
+        self.eps_len += 1
+
+        # Update the memory. It starts again from zero after a lost life.
+        if self.done:
+            self.previous_s1 = None
+        else:
+            self.previous_s1 = out['s1']
+
+        # Store this step
         self.rewards.append(self.reward)
-        self.states.append(current_state)
-        self.next_states.append(self.state.unsqueeze(0))
-        if x_restored is not None:
-            self.x_restoreds.append(x_restored)
-        if pred_s2 is not None:
-            self._store_hidden_transition(s1_t, s2_t, pred_s2)
-            self.values_intrinsic2.append(value_intrinsic2)
-            self.option_end_values.append(None)
-            self.option_end_intrinsic.append(None)
-            self.option_end_oracle.append(None)
-        if kl is not None:
-            self.kls.append(kl)
+        self.log_probs.append(action_log_prob.gather(1, action))
+        self.entropies.append(action_entropy)
+        self.values.append(out['value'])
+        self.values_intrinsic.append(out['value_intrinsic'])
+        self.oracle1_predictions.append(out['oracle1_prediction'])
+        self.s1_states.append(out['s1'].detach())
+        self.s1_history.append(out['s1'].detach())
+
+        self.options.append(option)
+        self.log_probs2.append(option_log_prob.gather(1, option))
+        self.entropies2.append(option_entropy)
+        self.values2.append(out['value2'])
+        self.values_intrinsic2.append(out['value_intrinsic2'])
+        self.oracle2_predictions.append(out['oracle2_prediction'])
+        self.s2_states.append(out['s2'])
+
+        # Filled in later, only if the option changes on the next step
+        self.option_end_values.append(None)
+        self.option_end_values_intrinsic.append(None)
+        self.option_end_oracle1.append(None)
+
+        # After a lost life there is no next state: its features count as zero
+        if self.done:
+            self.s1_states.append(torch.zeros_like(out['s1']))
+            self.s2_states.append(torch.zeros_like(out['s2']))
         return self
 
     def action_test(self):
         with torch.no_grad():
             if self.done:
-                if self.gpu_id >= 0:
-                    with torch.cuda.device(self.gpu_id):
-                        self.cx = torch.zeros(1, self.hidden_size).cuda()
-                        self.hx = torch.zeros(1, self.hidden_size).cuda()
-                else:
-                    self.cx = torch.zeros(1, self.hidden_size)
-                    self.hx = torch.zeros(1, self.hidden_size)
-                # Reset model internal memory if applicable
-                try:
-                    if hasattr(self.model, 'running_mem'):
-                        self.model.running_mem = torch.zeros_like(self.model.running_mem)
-                    if hasattr(self.model, 'prev_x_conv'):
-                        self.model.prev_x_conv = None
-                    if hasattr(self.model, 'prev_shared'):
-                        self.model.prev_shared = None
-                    if hasattr(self.model, 'memdiff_sum'):
-                        self.model.memdiff_sum = None
-                        self.model.memdiff_count = 0
-                except:
-                    pass
-                
-            model_output = self.model(
-                self.state.unsqueeze(0), self.hx, self.cx, None
-            )
-            if len(model_output) >= 4:
-                # For hierarchical models (8 elements), use first 4: V1, a1, hx, cx
-                # For non-hierarchical models (4-6 elements), use all available
-                value, logit, self.hx, self.cx = model_output[:4]
-            prob = F.softmax(logit, dim=1)
-            action = prob.cpu().numpy().argmax()
-        state, self.reward, self.done, self.info = self.env.step(action)
-        if self.gpu_id >= 0:
-            with torch.cuda.device(self.gpu_id):
-                self.state = torch.from_numpy(state).float().cuda()
-        else:
-            self.state = torch.from_numpy(state).float()
-
+                self.previous_s1 = None
+            out = self.model(self.state.unsqueeze(0), self.previous_s1)
+            self.previous_s1 = out['s1']
+            action = out['action_logits'].argmax(dim=1).item()
+        next_state, self.reward, self.done, self.info = self.env.step(action)
+        self.state = torch.from_numpy(next_state).float()
         self.eps_len += 1
         return self
 
     def clear_actions(self):
-        self.values = []
-        self.values2 = []
-        self.values_intrinsic = []
-        self.values_intrinsic2 = []
-        self.log_probs = []
-        self.log_probs2 = []
+        # Level 1, one entry per step
         self.rewards = []
+        self.log_probs = []
         self.entropies = []
+        self.values = []
+        self.values_intrinsic = []
+        self.oracle1_predictions = []
+        # Level 2, one entry per step
+        self.options = []
+        self.log_probs2 = []
         self.entropies2 = []
-        self.actions2 = []
-        self.x_restoreds = []
-        self.oracle2_preds = []
+        self.values2 = []
+        self.values_intrinsic2 = []
+        self.oracle2_predictions = []
+        # Features, one entry per step plus one for the state after the last step
         self.s1_states = []
         self.s2_states = []
+        # Values of a finished option at the state where it ended
         self.option_end_values = []
-        self.option_end_intrinsic = []
-        self.option_end_oracle = []
-        self.kls = []
-        self.next_states = []
-        self.states = []
-        self.shared_states = []
+        self.option_end_values_intrinsic = []
+        self.option_end_oracle1 = []
         return self

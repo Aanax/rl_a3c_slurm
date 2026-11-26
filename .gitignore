@@ -19,3 +19,4 @@ Eval_*/
 .cursor/
 .venv/
 logs/
+_unused/
